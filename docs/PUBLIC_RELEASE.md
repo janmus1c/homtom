@@ -10,7 +10,7 @@ Tooling:
 | `scripts/public-scan.sh OUTDIR` | Grep the export for personal data and secrets. Prints `file:line: [kind] match`, exits 1 on findings. `PUBLIC_EMAIL` marks the neutral address as allowed; `PUBLIC_SCAN_EXTRA` takes an extra regex (put owner-specific hostnames and names there, never in the repo). |
 
 ```sh
-PUBLIC_NAME='homtom contributors' PUBLIC_EMAIL='noreply@example.invalid' \
+PUBLIC_NAME='janmus1c' PUBLIC_EMAIL='noreply@example.invalid' \
   scripts/public-export.sh /tmp/homtom-public
 PUBLIC_EMAIL='noreply@example.invalid' \
   PUBLIC_SCAN_EXTRA='your-private-hostname|other-private-term' \
