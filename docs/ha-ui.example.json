@@ -1,0 +1,32 @@
+{
+  "read": "rest",
+  "push_listen": "0.0.0.0:8766",
+  "dump": ".runtime/ha-ui.dump.json",
+  "state_interval_s": 2,
+  "event_interval_s": 1,
+  "areas_helper": "input_text.homtom_ui_areas",
+  "auto_regen": false,
+  "auto_upload": false,
+  "rotate_events": true,
+  "pages_max": 12,
+  "nav": "both",
+  "areas": [
+    {"id": "office", "title": "Office", "icon": "chair-rolling"}
+  ],
+  "slots": {
+    "office_all":      {"area": "office", "entity": "light.room_all_lights", "name": "All lights", "main": true, "ct_min": 2000, "ct_max": 6500},
+    "office_amb":      {"area": "office", "entity": "light.room_ambient_bulb", "name": "Ambient", "ops": ["toggle", "set_bri"]},
+    "office_play1":    {"area": "office", "entity": "light.room_color_lamp_1", "name": "Play 1", "ct_min": 2000, "ct_max": 6500},
+    "office_play2":    {"area": "office", "entity": "light.room_color_lamp_2", "name": "Play 2", "ct_min": 2000, "ct_max": 6500},
+    "office_aurelle":  {"area": "office", "entity": "light.room_ceiling_panel", "name": "Ceiling", "ops": ["toggle", "set_bri", "set_ct"], "ct_min": 2200, "ct_max": 6500},
+    "office_presence": {"area": "office", "entity": "binary_sensor.room_presence_occupancy", "name": "Presence"},
+    "office_co2":      {"area": "office", "entity": "sensor.room_air_monitor_carbon_dioxide", "name": "CO2", "decimals": 0, "good_below": 1000},
+    "office_temp":     {"area": "office", "entity": "sensor.room_air_monitor_temperature", "name": "Temp"},
+    "office_hum":      {"area": "office", "entity": "sensor.room_air_monitor_humidity", "name": "Humidity", "decimals": 0},
+    "office_pm25":     {"area": "office", "entity": "sensor.room_air_monitor_pm2_5", "name": "PM2.5", "decimals": 0},
+    "office_thermo":   {"area": "office", "entity": "climate.room_thermostat", "name": "Heating", "min": 10, "max": 26, "modes": ["off", "heat"]},
+    "office_ac_pwr":   {"area": "office", "entity": "button.room_ir_module_on_off", "name": "Vent on/off", "confirm": true},
+    "office_ac_high":  {"area": "office", "entity": "button.room_ir_module_high", "name": "Vent high"},
+    "office_ac_low":   {"area": "office", "entity": "button.room_ir_module_low", "name": "Vent low"}
+  }
+}
