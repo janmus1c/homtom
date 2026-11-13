@@ -1,0 +1,63 @@
+homtom
+Copyright (c) 2026 homtom contributors
+
+See LICENSE for how the licences are split across the tree.
+
+TomTom is a trademark of its owner; this project is not affiliated with or
+endorsed by TomTom; it ships no TomTom software, maps or firmware.
+
+Third-party material in this tree
+=================================
+
+Each entry names the path, the origin, and the licence as stated in the file
+or in the source it was generated from. Upstream headers are kept as found.
+
+tools/ttimage/blowfish.c, tools/ttimage/blowfish.h
+  Blowfish implementation, Copyright (C) 1997 Paul Kocher.
+  GNU Lesser General Public License, version 2.1 or later (stated in the file
+  headers). Text: https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt
+
+tools/ttimage/md5.c, tools/ttimage/md5.h
+  MD5 by Colin Plumb, 1993. The header says no copyright is claimed and the
+  code is in the public domain.
+
+tools/ttimage/mkttimage.c
+  "TomTom Go Firmware generator", (C) 2004 Thomas Kleffel.
+  GNU General Public License, version 2 or (at your option) any later
+  version (stated in the file header). Built together with the Blowfish code
+  above.
+
+workspace/gui/font_data.h, workspace/gui/OFL.txt
+  Glyph tables generated from Roboto, Copyright 2011 The Roboto Project
+  Authors (https://github.com/googlefonts/roboto-classic).
+  SIL Open Font License 1.1 (workspace/gui/OFL.txt).
+  tools/gui-assets/fetch.sh downloads the pinned font and its OFL.txt into
+  build/gui-assets/ (not committed).
+
+workspace/gui/icon_data.h, tools/gui-assets/gen_icons.py
+  Icon bitmaps generated from Material Design Icons (@mdi/svg 7.4.47,
+  https://pictogrammers.com/library/mdi/). The header states the icons are
+  licensed under the Apache License 2.0.
+  Text: https://www.apache.org/licenses/LICENSE-2.0
+
+brand/fonts/*.ttf, brand/fonts/OFL.txt, workspace/gui/wordmark_data.h
+  Poppins, Copyright 2020 The Poppins Project Authors
+  (https://github.com/itfoundry/Poppins).
+  SIL Open Font License 1.1 (brand/fonts/OFL.txt). The fonts are unchanged.
+  The wordmark bitmap table in wordmark_data.h is derived from Poppins
+  SemiBold.
+
+kernel/patches/, kernel/homtom/, kernel/modules/
+  Patches and new files for the Linux kernel, version 6.1. They are derived
+  from or built into the kernel and are GPL-2.0-only. The kernel itself is not
+  included; it is fetched from kernel.org at build time.
+
+Open points
+===========
+
+- icon_data.h is derived from Apache-2.0 icons (Material Design Icons); the
+  Apache-2.0 text is in LICENSES/Apache-2.0.txt.
+- The 2004 TomTom image extractor (ttimgextract) is not included because its
+  source states no licence.
+- Files without an SPDX-License-Identifier line fall under the split in
+  LICENSE by directory. Third-party headers above take precedence.

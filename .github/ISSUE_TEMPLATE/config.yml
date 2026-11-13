@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Unit will not boot
+    url: https://github.com/janmus1c/homtom/blob/main/docs/flash-safety.md
+    about: Read the flash safety notes before opening an issue.
+  - name: Questions and ideas
+    url: https://github.com/janmus1c/homtom/discussions
+    about: Use Discussions for questions that are not bugs.
+  - name: Security report
+    url: https://github.com/janmus1c/homtom/security/advisories/new
+    about: Report leaked secrets or vulnerabilities privately.

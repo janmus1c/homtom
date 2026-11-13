@@ -1,0 +1,40 @@
+homtom is released under more than one licence, depending on the part.
+
+| Part | Licence | Text |
+|---|---|---|
+| Kernel patches, board file, kernel modules (`kernel/`) | GPL-2.0-only | `LICENSES/GPL-2.0-only.txt` |
+| All other original code: `userland/`, `tools/`, `panel/`, `gateway/`, `emulator/`, `scripts/`, `workspace/`, firmware tooling, documentation | MIT (the text below) | `LICENSES/MIT.txt` |
+| Brand artwork (`brand/`, except fonts) | CC-BY-4.0 | `brand/LICENSE` |
+| Poppins fonts (`brand/fonts/`) | SIL OFL 1.1, unchanged | `brand/fonts/OFL.txt` |
+| Third-party sources in the tree | Their own licences | `NOTICE` |
+
+Code that is linked into or loaded by the kernel stays GPL-2.0-only. Where a
+file carries an `SPDX-License-Identifier` line, that line decides. Where it
+carries an upstream copyright header, that header decides.
+
+TomTom is a trademark of its owner. This project is not affiliated with or
+endorsed by TomTom, and it ships no TomTom software, maps or firmware.
+
+---
+
+MIT License
+
+Copyright (c) 2026 homtom contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
