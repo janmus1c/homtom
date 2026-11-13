@@ -1,0 +1,2 @@
+FROM --platform=linux/amd64 python:3.11-slim
+RUN pip install -q --only-binary=:all: unicorn==2.0.1.post1

@@ -1,0 +1,11 @@
+#!/bin/busybox sh
+# Re-enumerate the USB link without a reboot: drop the D+ pull-up so the host sees an unplug, then raise it again.
+# Used by the Bluetooth command "usbkick" (homtom-btd) and available from the shell. Never leaves the pull-up low.
+P=/sys/kernel/homtom_usb_pullup
+[ -w $P ] || { echo "no $P" > /dev/kmsg 2> /dev/null; exit 1; }
+trap 'echo 1 > $P' EXIT HUP INT TERM
+echo "homtom-usbkick: pull-up off 3 s" > /dev/kmsg 2> /dev/null
+echo 0 > $P
+sleep 3
+echo 1 > $P
+trap - EXIT HUP INT TERM

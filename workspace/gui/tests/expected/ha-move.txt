@@ -1,0 +1,2 @@
+event: seq=1 up=93784 event=ha name=office_hue1 value=toggle page=office
+event: seq=2 up=93784 event=ha name=office_hue1 value=toggle page=light_hue1

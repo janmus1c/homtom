@@ -1,0 +1,5 @@
+event: seq=1 up=93784 event=ha name=office_amb value=toggle page=a
+page: a
+spawn[backlight]: /bin/homtom-bl 0
+event: seq=2 up=93784 event=screen name=lock value=1 page=a
+page: a (locked)

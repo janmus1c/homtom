@@ -1,0 +1,6 @@
+#!/bin/bash
+# Show a raw RGB565 480x272 frame (261120 bytes, e.g. brand/splash/*.fb) on the LCD of the running device and mute the
+# text console. Needs /tmp/devcp or /bin/devcp on the device (tools/devtools/devcp). Usage: homtom-draw FILE.fb
+d=$(dirname "$0")
+"$d/homtom-put" "$1" /tmp/frame.fb > /dev/null
+"$d/homtom-sh" '[ -x /bin/devcp ] && C=/bin/devcp || C=/tmp/devcp; echo 1 > /sys/kernel/homtom_splash; $C /tmp/frame.fb 0x33F00000; echo drawn rc=$?' 4

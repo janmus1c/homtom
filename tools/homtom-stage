@@ -1,0 +1,87 @@
+#!/bin/bash
+# Stage a ttsystem on INTERNAL while in storage mode. Usage: homtom-stage /path/to/ttsystem
+# The image is copied to ttsystem.new on the same volume (retried up to 4 times: the first cp onto a freshly mounted
+# INTERNAL often fails with "Permission denied"), read back and compared by sha256 with the source, and only then renamed
+# to ttsystem, so a failed or partial copy never replaces the bootable image.
+# ttsystem.prev (the fallback used by tools/homtom-recover) is only replaced when the current ttsystem was marked good
+# (tools/homtom-mark-good, run after a verified boot); staging twice after a bad image therefore keeps the last good one.
+# Output on success: "staged <16 hex chars of sha256> <bytes> bytes (attempt N)". Exit codes:
+#   0 staged and verified   1 not in storage mode   2 bad usage or unreadable source
+#   3 copy or verification failed after all attempts (ttsystem untouched)
+#   4 ttsystem.prev could not be written (ttsystem untouched)   5 rename into place failed
+set -u
+V=${HOMTOM_VOLUME:-/Volumes/INTERNAL}
+TRIES=${HOMTOM_STAGE_TRIES:-4}
+src=${1:-}
+[ -d "$V" ] || { echo "not in storage mode"; exit 1; }
+[ -n "$src" ] && [ -f "$src" ] && [ -r "$src" ] || { echo "usage: homtom-stage /path/to/ttsystem" >&2; exit 2; }
+want=$(shasum -a 256 "$src" | cut -d' ' -f1)
+size=$(wc -c < "$src" | tr -d ' ')
+[ -n "$want" ] && [ "$size" -gt 0 ] || { echo "cannot read $src" >&2; exit 2; }
+tmp=$V/ttsystem.new
+trap 'rm -f "$tmp" "$V/ttsystem.prev.new" 2>/dev/null' EXIT
+
+# sha256 of a file as it is on the volume: bypass the page cache where python3 can (macOS F_NOCACHE), else plain shasum.
+disk_sha() {
+	python3 -I - "$1" 2> /dev/null <<'PY' || shasum -a 256 "$1" | cut -d' ' -f1
+import fcntl, hashlib, sys
+fd = open(sys.argv[1], "rb", buffering=0)
+try:
+    fcntl.fcntl(fd.fileno(), 48, 1)  # F_NOCACHE
+except OSError:
+    pass
+h = hashlib.sha256()
+while True:
+    b = fd.read(1 << 20)
+    if not b:
+        break
+    h.update(b)
+print(h.hexdigest())
+PY
+}
+
+# copy_verified SRC DST: cp, sync, size and sha256 readback; prints the reason on failure.
+copy_verified() {
+	rm -f "$2"
+	cp "$1" "$2" || return 1
+	sync
+	[ "$(wc -c < "$2" | tr -d ' ')" = "$size" ] || { echo "size mismatch after copy" >&2; return 1; }
+	got=$(disk_sha "$2")
+	[ "$got" = "$want" ] || { echo "sha256 mismatch after copy (got ${got:0:16}, want ${want:0:16})" >&2; return 1; }
+}
+
+rm -f "$tmp" "$V/ttsystem.prev.new"
+ok=0
+n=1
+while [ "$n" -le "$TRIES" ]; do
+	if copy_verified "$src" "$tmp"; then ok=1; break; fi
+	echo "stage attempt $n/$TRIES failed" >&2
+	rm -f "$tmp"
+	[ "$n" -lt "$TRIES" ] && sleep "$n"
+	n=$((n + 1))
+done
+[ "$ok" = 1 ] || { echo "STAGE FAILED after $TRIES attempts; ttsystem left untouched"; exit 3; }
+
+if [ -f "$V/ttsystem" ]; then
+	if [ -f "$V/homtom/current.good" ] || [ ! -f "$V/ttsystem.prev" ]; then
+		# the fallback is written like the image: temporary name, verified, renamed
+		want_cur=$(shasum -a 256 "$V/ttsystem" | cut -d' ' -f1)
+		size_cur=$(wc -c < "$V/ttsystem" | tr -d ' ')
+		prev_ok=0
+		for m in 1 2 3 4; do
+			rm -f "$V/ttsystem.prev.new"
+			if cp "$V/ttsystem" "$V/ttsystem.prev.new" && sync \
+				&& [ "$(wc -c < "$V/ttsystem.prev.new" | tr -d ' ')" = "$size_cur" ] \
+				&& [ "$(disk_sha "$V/ttsystem.prev.new")" = "$want_cur" ]; then prev_ok=1; break; fi
+			sleep "$m"
+		done
+		[ "$prev_ok" = 1 ] || { echo "STAGE FAILED: could not write ttsystem.prev; ttsystem left untouched"; exit 4; }
+		mv -f "$V/ttsystem.prev.new" "$V/ttsystem.prev" || { echo "STAGE FAILED: could not rename ttsystem.prev"; exit 4; }
+	else
+		echo "note: current ttsystem was never marked good, keeping the existing ttsystem.prev"
+	fi
+fi
+rm -f "$V/homtom/current.good"
+mv -f "$tmp" "$V/ttsystem" || { echo "STAGE FAILED: rename into place failed"; exit 5; }
+sync
+echo "staged ${want:0:16} $size bytes (attempt $n)"

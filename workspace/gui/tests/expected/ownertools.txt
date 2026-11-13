@@ -1,0 +1,13 @@
+spawn[gps]: /bin/homtom-gps-aid
+event: seq=1 up=93784 event=cmd name=gps-aid value=0 page=gps
+spawn[gps]: /bin/homtom-hw gps-off
+event: seq=2 up=93784 event=cmd name=gps-off value=0 page=gps
+spawn[gps]: /bin/homtom-hw gps-on
+event: seq=3 up=93784 event=cmd name=gps-on value=0 page=gps
+spawn[bt]: /bin/homtom-bt-visible
+event: seq=4 up=93784 event=cmd name=bt-visible value=0 page=bluetooth
+spawn[audio]: /bin/homtom-mic-test
+event: seq=5 up=93784 event=cmd name=mic-test value=0 page=audio
+spawn[audio]: /bin/homtom-snd2 --hz 1000 --secs 1 --vol 89
+event: seq=6 up=93784 event=beep name=beep value=60 page=audio
+page: power

@@ -1,0 +1,181 @@
+#!/usr/bin/env -S python3 -I
+"""Drive the device touch UI from the Mac: taps, swipes, slider drags and the power key, optionally followed by a screenshot.
+
+usage: homtom-tap tap X Y [--hold MS]
+       homtom-tap swipe X0 Y0 X1 Y1 [--ms N] [--steps K]
+       homtom-tap slider XLEFT XRIGHT Y PCT [PCT ...]     drag along a slider track (percent of its width), then release
+       homtom-tap key short|long|hold5|hold10
+  options (any command): --shot [OUT.png]   screenshot via tools/homtom-screen after the input (default .runtime/screen/shot.png)
+                         --settle S         seconds to wait before the screenshot (default 1)
+                         --dry-run          print the lines and the device command, touch nothing
+
+X,Y are screen pixels (0..479, 0..271), not raw ADC values. Lines are written to the named pipe /tmp/ui.in, which the
+launcher userland/homtom-ui-start makes the GUI read next to the real touch events. This bypasses the touch controller:
+it tests UI logic, not the panel. The device shell has only whole-second sleep, so --hold and --ms are rounded up to
+seconds and shorter moves are sent as one burst. Exit status: 0 ok, 2 bad arguments, 3 no /tmp/ui.in (old launcher
+still running), 4 pipe exists but nothing reads it (GUI not running), 5 device did not answer.
+"""
+import argparse, pathlib, subprocess, sys, time
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+TOOLS = ROOT / "tools"
+W, H = 480, 272
+PIPE = "/tmp/ui.in"
+
+
+class TapError(Exception):
+    def __init__(self, msg, code):
+        super().__init__(msg)
+        self.code = code
+
+
+def clamp_check(x, y):
+    if not (0 <= x < W and 0 <= y < H):
+        raise TapError(f"point {x},{y} is outside the {W}x{H} screen", 2)
+
+
+def secs(ms):
+    return -(-int(ms) // 1000)
+
+
+def plan_tap(x, y, hold_ms=0):
+    clamp_check(x, y)
+    p = [("line", f"t {x} {y}")]
+    if hold_ms > 0:
+        p.append(("sleep", secs(hold_ms)))
+    p.append(("line", "up"))
+    return p
+
+
+def plan_swipe(x0, y0, x1, y1, ms=0, steps=8):
+    clamp_check(x0, y0)
+    clamp_check(x1, y1)
+    steps = max(1, steps)
+    per = secs(ms / steps) if ms and ms / steps >= 1000 else 0
+    p = []
+    for i in range(steps + 1):
+        p.append(("line", f"t {x0 + (x1 - x0) * i // steps} {y0 + (y1 - y0) * i // steps}"))
+        if per and i < steps:
+            p.append(("sleep", per))
+    p.append(("line", "up"))
+    return p
+
+
+def plan_slider(xl, xr, y, pcts):
+    if xr <= xl or not pcts:
+        raise TapError("slider needs XLEFT < XRIGHT and at least one PCT", 2)
+    p = []
+    for pc in pcts:
+        if not 0 <= pc <= 100:
+            raise TapError("PCT must be 0..100", 2)
+        x = xl + (xr - xl) * pc // 100
+        clamp_check(x, y)
+        p.append(("line", f"t {x} {y}"))
+    p.append(("line", "up"))
+    return p
+
+
+def plan_key(kind):
+    if kind not in ("short", "long", "hold5", "hold10"):
+        raise TapError("key must be short, long, hold5 or hold10", 2)
+    return [("line", f"key {kind}")]
+
+
+def device_command(plan):
+    """One ash script for homtom-sh. The writer runs in the background so a missing reader cannot hang the shell."""
+    body = []
+    total = 0
+    for kind, v in plan:
+        if kind == "line":
+            body.append(f"echo {v}")
+        else:
+            body.append(f"sleep {v}")
+            total += v
+    polls = " ".join(str(i) for i in range(1, total + 3))
+    cmd = (f"if [ -p {PIPE} ]; then {{ {'; '.join(body)}; }} > {PIPE} & p=$!; "
+           f"for i in {polls}; do kill -0 $p 2>/dev/null || break; sleep 1; done; "
+           f"if kill -0 $p 2>/dev/null; then kill $p; echo UIRESULT=blocked; else echo UIRESULT=ok; fi; "
+           f"else echo UIRESULT=nopipe; fi")
+    return cmd, total + 3
+
+
+def sh(cmd, wait):
+    try:
+        return subprocess.run([str(TOOLS / "homtom-sh"), cmd, str(min(wait, 25))], capture_output=True, text=True,
+                              timeout=45).stdout
+    except subprocess.TimeoutExpired:
+        return ""
+
+
+def result_of(out):
+    for l in out.splitlines():
+        if l.startswith("UIRESULT="):
+            return l.split("=", 1)[1].strip()
+    return None
+
+
+def send(plan, dry=False, log=print):
+    cmd, wait = device_command(plan)
+    if dry:
+        for kind, v in plan:
+            log(f"  {kind}: {v}")
+        log(f"  homtom-sh {cmd!r} {wait}")
+        return
+    st = subprocess.run([str(TOOLS / "homtom-state")], capture_output=True, text=True).stdout
+    if "state=LINUX" not in st:
+        raise TapError(f"device not in LINUX state: {st.strip()}", 5)
+    res = result_of(sh(cmd, wait))
+    if res is None:
+        time.sleep(1)
+        res = result_of(sh(cmd, wait))
+    if res == "ok":
+        return
+    if res == "nopipe":
+        raise TapError(f"{PIPE} does not exist on the device: the running image still has the old userland/homtom-ui-start. "
+                       "Input injection needs the image with the modified launcher, booted. Nothing was sent.", 3)
+    if res == "blocked":
+        raise TapError(f"{PIPE} exists but nothing reads it: the GUI is not running (gui.disable, crashed or still starting). "
+                       "Nothing was applied.", 4)
+    raise TapError("the device did not answer (no result after one retry); the input may or may not have been applied", 5)
+
+
+def screenshot(out, settle):
+    time.sleep(settle)
+    r = subprocess.run([str(TOOLS / "homtom-screen"), "-o", str(out)], capture_output=True, text=True, timeout=120)
+    print((r.stdout + r.stderr).strip())
+    if r.returncode:
+        raise TapError("screenshot failed", 5)
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("cmd", choices=("tap", "swipe", "slider", "key"))
+    ap.add_argument("args", nargs="*")
+    ap.add_argument("--hold", type=int, default=0)
+    ap.add_argument("--ms", type=int, default=0)
+    ap.add_argument("--steps", type=int, default=8)
+    ap.add_argument("--shot", nargs="?", const=str(ROOT / ".runtime/screen/shot.png"), default=None)
+    ap.add_argument("--settle", type=float, default=1.0)
+    ap.add_argument("--dry-run", action="store_true")
+    a = ap.parse_args(argv)
+    try:
+        try:
+            n = [int(v) for v in a.args] if a.cmd != "key" else a.args
+        except ValueError:
+            raise TapError("coordinates must be integers", 2)
+        need = {"tap": 2, "swipe": 4, "key": 1}.get(a.cmd)
+        if (need and len(n) != need) or (a.cmd == "slider" and len(n) < 4):
+            raise TapError(f"wrong number of arguments for {a.cmd} (see --help)", 2)
+        plan = {"tap": lambda: plan_tap(*n, a.hold), "swipe": lambda: plan_swipe(*n, a.ms, a.steps),
+                "slider": lambda: plan_slider(n[0], n[1], n[2], n[3:]), "key": lambda: plan_key(n[0])}[a.cmd]()
+        send(plan, a.dry_run)
+        if a.shot is not None and not a.dry_run:
+            screenshot(a.shot, a.settle)
+    except TapError as e:
+        print(f"homtom-tap: {e}", file=sys.stderr)
+        return e.code
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

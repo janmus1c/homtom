@@ -1,0 +1,10 @@
+event: seq=1 up=93784 event=key name=short value=1 page=office_l1
+event: seq=2 up=93784 event=key name=short value=1 page=office_l2
+event: seq=3 up=93784 event=key name=short value=1 page=office_l1
+event: seq=4 up=93784 event=key name=short value=1 page=office
+event: seq=5 up=93784 event=ha name=office_all value=set_bri:0 page=office
+event: seq=6 up=93784 event=ha name=office_all value=set_bri:80 page=office
+event: seq=7 up=93784 event=ha name=office_thermo value=set_target:22.0 page=office
+event: seq=8 up=93784 event=ha name=office_thermo value=mode:off page=office
+event: seq=9 up=93784 event=ha name=office_ac_pwr value=press page=office
+event: seq=10 up=93784 event=ha name=kitchen_a1 value=toggle page=kitchen

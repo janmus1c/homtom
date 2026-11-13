@@ -1,0 +1,62 @@
+#!/bin/busybox sh
+# homtom-bt-visible: the "BT visible" button of the Tools page (docs/SCREEN_TOOLS.md). Opens the Bluetooth pairing window
+# for 300 s by writing that length into /tmp/bt.pair; homtom-btd closes the window when the time is up or after the first
+# new pairing. While it is open the remaining seconds go to /tmp/ui.extra every 5 s as bt_visible_s, 0 once closed, and
+# bt_visible says open, paired, closed, no btd or no PIN. The unit is discoverable all the time; the window decides
+# whether a new device may pair with the PIN in INTERNAL:/homtom/bt.pin. This script only tests that the PIN file is not
+# empty; it never reads or prints the PIN.
+PATH=/bin:/sbin:/usr/bin:/usr/sbin
+export PATH
+LEN=300
+P=/tmp/bt.pair
+show() { homtom-ui-extra "bt_visible_s=$1" "bt_visible=$2"; }
+keys() {
+	n=$(grep -c "link key stored" /tmp/btd.log 2> /dev/null)
+	echo "${n:-0}"
+}
+uptime_s() {
+	read up rest < /proc/uptime
+	echo "${up%%.*}"
+}
+
+homtom-lock btvisible $$ || exit 0
+trap 'rm -f /tmp/lock.btvisible' EXIT
+if ! pidof homtom-btd > /dev/null; then
+	show 0 "no btd"
+	exit 1
+fi
+if [ ! -s /mnt/internal/homtom/bt.pin ]; then
+	show 0 "no PIN"
+	exit 1
+fi
+before=$(keys)
+# a window that is already open gets a fresh one: btd only reads the length when it sees the file appear
+if [ -f $P ]; then
+	rm -f $P
+	sleep 2
+fi
+echo $LEN > $P.new && mv -f $P.new $P
+echo "homtom-bt-visible: pairing window open for $LEN s" > /dev/kmsg 2> /dev/null
+t0=$(uptime_s)
+state=closed
+while :; do
+	left=$((LEN - ($(uptime_s) - t0)))
+	if [ ! -f $P ]; then
+		[ "$(keys)" -gt "$before" ] && state=paired
+		break
+	fi
+	if [ $left -le -10 ]; then
+		# btd closes the window within a second of its end; an older btd without the timer does not
+		rm -f $P
+		break
+	fi
+	if [ $left -gt 0 ]; then
+		show $left open
+	else
+		show 0 closing
+	fi
+	sleep 5
+done
+show 0 $state
+echo "homtom-bt-visible: pairing window $state" > /dev/kmsg 2> /dev/null
+exit 0

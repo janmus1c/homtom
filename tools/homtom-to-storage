@@ -1,0 +1,9 @@
+#!/bin/bash
+# Reboot the running device into bootloader storage mode (INTERNAL/NO NAME mount on the Mac). Needs state LINUX.
+# The first reboot request is occasionally lost (uptime keeps counting), so a second attempt follows if the device is still up.
+d=$(dirname "$0")
+for attempt in 1 2; do
+	"$d/homtom-state" >/dev/null && { "$d/homtom-sh" 'sh /bin/reboot' 8 >/dev/null 2>&1; }
+	"$d/homtom-wait" STORAGE "${1:-90}" && exit 0
+done
+exit 1

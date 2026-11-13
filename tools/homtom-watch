@@ -1,0 +1,66 @@
+#!/bin/bash
+# Live view of the homtom USB link: USB device, Mac interface, both device IPs, Telnet and FTP.
+# Read-only; Ctrl-C to stop. Usage: tools/homtom-watch [interval-seconds]
+INTERVAL=${1:-2}
+MAC=02:54:54:00:06:31
+G=$'\e[32m'; R=$'\e[31m'; Y=$'\e[33m'; D=$'\e[2m'; B=$'\e[1m'; N=$'\e[0m'
+last_state=""
+since=$(date +%s)
+log=()
+
+mark() { [ "$1" = 1 ] && printf "%s● %s%s" "$G" "$2" "$N" || printf "%s○ %s%s" "$R" "$2" "$N"; }
+
+while true; do
+	usb=0; usbname=""
+	line=$(ioreg -p IOUSB -w0 | grep -e 'Ethernet Gadget' -e 'GO@' | head -1)
+	[ -n "$line" ] && { usb=1; usbname=$(sed 's/.*-o \([^<]*\)<.*/\1/' <<<"$line"); }
+	iface=""; ifstatus="absent"; ifaddr=""
+	for i in $(ifconfig -l); do
+		if ifconfig "$i" 2>/dev/null | grep -q "$MAC"; then
+			iface=$i
+			ifstatus=$(ifconfig "$i" | awk '/status:/{print $2}')
+			ifaddr=$(ifconfig "$i" | awk '/inet /{print $2}')
+		fi
+	done
+	p1=0; p2=0; tel=0; ftp=0; rtt=""
+	if [ -n "$iface" ]; then
+		out=$(ping -c1 -t1 -b "$iface" 192.168.1.10 2>/dev/null) && { p1=1; rtt=$(sed -n 's/.*time=\([0-9.]*\).*/\1/p' <<<"$out"); }
+		ping -c1 -t1 -b "$iface" 169.254.10.10 >/dev/null 2>&1 && p2=1
+		host=192.168.1.10; [ $p1 = 0 ] && [ $p2 = 1 ] && host=169.254.10.10
+		if [ $p1 = 1 ] || [ $p2 = 1 ]; then
+			nc -z -G 2 -b "$iface" $host 23 >/dev/null 2>&1 && tel=1
+			nc -z -G 2 -b "$iface" $host 21 >/dev/null 2>&1 && ftp=1
+		fi
+	fi
+	disk=0; [ -d /Volumes/INTERNAL ] && disk=1
+
+	state="$usb$ifstatus$p1$p2$tel$ftp$disk"
+	now=$(date +%s)
+	if [ "$state" != "$last_state" ]; then
+		since=$now
+		summary="usb=$usb if=${iface:-none}/$ifstatus ip=${ifaddr:--} 192.168.1.10=$p1 169.254.10.10=$p2 telnet=$tel ftp=$ftp storage=$disk"
+		log=("$(date '+%H:%M:%S') $summary" "${log[@]:0:11}")
+		last_state=$state
+	fi
+
+	if [ $tel = 1 ]; then verdict="${G}${B}CONNECTED — telnet ${host} works${N}"
+	elif [ $p1 = 1 ] || [ $p2 = 1 ]; then verdict="${Y}${B}PINGS, services not up yet${N}"
+	elif [ $disk = 1 ]; then verdict="${Y}${B}STORAGE MODE (disks mounted)${N}"
+	elif [ "$ifstatus" = active ]; then verdict="${Y}${B}LINK UP, no packets from device${N}"
+	elif [ $usb = 1 ]; then verdict="${Y}${B}USB DEVICE SEEN, no network interface${N}"
+	else verdict="${R}${B}NOTHING ON USB${N}"; fi
+
+	printf '\e[H\e[2J'
+	printf "%shomtom link%s  %s  %s(this state for %ss)%s\n\n" "$B" "$N" "$(date '+%H:%M:%S')" "$D" "$((now - since))" "$N"
+	printf "  %s\n\n" "$verdict"
+	printf "  %s  %s\n" "$(mark $usb 'USB device')" "${D}${usbname}${N}"
+	printf "  %s  %s\n" "$(mark $([ "$ifstatus" = active ] && echo 1 || echo 0) 'Mac interface')" "${D}${iface:-none} ${ifstatus} ${ifaddr}${N}"
+	printf "  %s  %s\n" "$(mark $p1 'ping 192.168.1.10')" "${D}${rtt:+${rtt} ms}${N}"
+	printf "  %s\n" "$(mark $p2 'ping 169.254.10.10')"
+	printf "  %s\n" "$(mark $tel 'telnet :23')"
+	printf "  %s\n" "$(mark $ftp 'ftp :21')"
+	printf "  %s\n\n" "$(mark $disk 'storage mode volume')"
+	printf "%schanges%s\n" "$B" "$N"
+	for l in "${log[@]}"; do printf "  %s%s%s\n" "$D" "$l" "$N"; done
+	sleep "$INTERVAL"
+done

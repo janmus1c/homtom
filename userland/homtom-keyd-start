@@ -1,0 +1,9 @@
+#!/bin/busybox sh
+# Start the power-key daemon (homtom-keyd) and respawn it if it exits (for example when the input device vanishes).
+# Skipped when INTERNAL carries homtom/keyd.disable.
+[ -f /mnt/internal/homtom/keyd.disable ] && exit 0
+homtom-lock keyd $$ || exit 0
+while :; do
+	homtom-keyd
+	sleep 2
+done

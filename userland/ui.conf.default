@@ -1,0 +1,91 @@
+# homtom ui.conf base: the System hub and its subpages (format: docs/UI_CONFIG.md, merge contract: "Base config").
+# Shipped as userland/ui.conf.default (the same file; tests/run.sh checks that the two agree). The Mac-side generator
+# writes the area pages (Office, ...) in front of this file; alone it starts on the hub. Page ids here are reserved:
+# system, display, gps, bluetooth, audio, device, power, time, tz1, tz2.
+# Header clock: INTERNAL:/homtom/tz (Time and date page), else the offset Home Assistant sends, else tz= below, for
+# example tz=60,eu (UTC+1 with EU summer time).
+ui version=1 title=homtom nav=dots
+# GPS power as last switched from the UI; the GPS is on after boot
+var name=gps value=1
+
+# power key: a short press locks or unlocks the screen, a long hold (1.5 to 5 s) opens the System hub
+on key=short screen:toggle
+on key=long page:system
+
+page id=system title=System hub=1 grid=3x2
+button at=0,0 label="Display and sound" icon=brightness-6 action=page arg=display key=var.backlight unit=" % brightness"
+button at=1,0 label=GPS icon=crosshairs-gps action=page arg=gps key=gps.fix
+button at=2,0 label=Bluetooth icon=bluetooth action=page arg=bluetooth key=bt.visible
+button at=0,1 label="Sound test" icon=microphone action=page arg=audio key=mic.result
+button at=1,1 label="Time and date" icon=clock-outline action=page arg=time key=clock
+button at=2,1 label=Device icon=information-outline action=page arg=device key=battery_pct_est unit=" % battery"
+
+page id=display title="Display and sound" grid=2x2 hidden=1 parent=system
+slider at=0,0 label=Brightness action=backlight min=5 max=100 step=5 unit=" %"
+slider at=1,0 label=Volume action=volume min=0 max=100 step=10 unit=" %"
+toggle at=0,1 label=Mute action=mute icon=volume-off
+button at=1,1 label="Lock screen" icon=power tap=screen:lock
+
+page id=gps title=GPS hidden=1 parent=system
+list x=8 y=40 w=228 h=168
+row label=Fix key=gps.fix
+row label=Satellites key=gps.sats
+row label="UTC time" key=gps.utc
+row label=Altitude key=gps.alt unit=" m"
+list x=244 y=40 w=228 h=138
+toggle x=244 y=40 w=228 h=69 label="GPS receiver" icon=crosshairs-gps var=gps action=cmd arg=gps key=gps.sats unit=" satellites"
+button x=244 y=109 w=228 h=69 label="GPS assist" icon=sync key=gps_aid verb=Send action=cmd arg=gps-aid
+
+page id=bluetooth title=Bluetooth hidden=1 parent=system
+list x=8 y=40 w=464 h=69
+button x=8 y=40 w=464 h=69 label=Pairing icon=bluetooth key=bt.visible verb=Open action=cmd arg=bt-visible
+list x=8 y=117 w=464 h=42
+row label=Connection key=bt_up fmt=onoff
+
+page id=audio title="Sound test" hidden=1 parent=system
+list x=8 y=40 w=464 h=138
+button x=8 y=40 w=464 h=69 label="Mic test" icon=microphone key=mic.result verb=Test action=cmd arg=mic-test
+button x=8 y=109 w=464 h=69 label="Test tone" icon=volume-high unit="1 kHz, 1 s" verb=Play action=beep arg=1000
+
+page id=device title=Device hidden=1 parent=system
+list x=8 y=40 w=228 h=210
+row label=Battery key=battery_pct_est unit=" %" low=16
+row label=Mains key=external_power fmt=yesno
+row label=Charging key=charging fmt=yesno
+row label=Uptime key=uptime
+row label="Ambient light" key=light_raw unavailable_below=10
+list x=244 y=40 w=228 h=42
+row label=Power icon=power tap=page:power
+
+# restart, power off and storage mode: each asks first (Cancel / the action)
+page id=power title=Power hidden=1 parent=device
+list x=8 y=40 w=464 h=207
+button x=8 y=40 w=464 h=69 label=Restart icon=restart unit="Through the storage window, back in about a minute" verb=Restart action=cmd arg=restart
+button x=8 y=109 w=464 h=69 label="Power off" icon=power unit="Stays off until the power key is pressed" verb="Power off" action=cmd arg=power-off
+button x=8 y=178 w=464 h=69 label="USB storage" icon=usb unit="With USB attached the Mac sees INTERNAL" verb=Restart action=storage
+
+page id=time title="Time and date" hidden=1 parent=system
+label x=12 y=40 w=300 h=40 key=clock font=l color=bone
+label x=12 y=82 w=460 h=22 key=date color=muted
+list x=8 y=114 w=464 h=126
+row label=Source key=tz.source
+row label=Zone key=tz.zone
+row label="Time zone" tap=page:tz1
+
+page id=tz1 title="Time zone" hidden=1 group=tz parent=time
+list x=8 y=40 w=464 h=205
+row label="Auto (from Home Assistant)" tap=tz:set:auto
+row label=UTC tap=tz:set:0
+row label="Central Europe (CET/CEST)" tap=tz:set:60,eu
+row label="Eastern Europe (EET/EEST)" tap=tz:set:120,eu
+row label="UK and Ireland (GMT/BST)" tap=tz:set:0,eu
+
+page id=tz2 title="Time zone" hidden=1 group=tz parent=time
+list x=8 y=40 w=464 h=160
+row label="US Eastern" tap=tz:set:-300,us
+row label="US Central" tap=tz:set:-360,us
+row label="US Mountain" tap=tz:set:-420,us
+row label="US Pacific" tap=tz:set:-480,us
+label x=12 y=214 w=230 h=24 key=tz.manual
+button x=264 y=206 w=100 h=40 label="−30 min" tap=tz:step:-30
+button x=372 y=206 w=100 h=40 label="+30 min" tap=tz:step:30

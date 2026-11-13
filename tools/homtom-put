@@ -1,0 +1,3 @@
+#!/bin/bash
+# Upload a file to the running device over FTP. Usage: homtom-put LOCAL /device/path
+timeout 60 curl -s -T "$1" "ftp://192.168.1.10$2" && echo "uploaded $1 -> $2"

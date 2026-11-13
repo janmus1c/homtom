@@ -1,0 +1,30 @@
+#!/bin/bash
+# One-shot device state for scripts. Read-only. Prints one line, e.g.
+#   state=LINUX ping=1 sh2323=1 telnet=1 ftp=1 usb=1 if=en9 storage=0
+# States: LINUX (our kernel, shell reachable), LINUX_PARTIAL (pings, no shell), LINK_UP (interface up, no packets),
+#         STORAGE (INTERNAL volume mounted), USB_ONLY (USB device seen, nothing usable), ABSENT (nothing on USB).
+# Exit code: 0 LINUX, 1 STORAGE, 2 anything else.
+MAC=02:54:54:00:06:31
+usb=0; line=$(ioreg -p IOUSB -w0 2>/dev/null | grep -e 'Ethernet Gadget' -e 'GO@' -e 'TomTom' | head -1); [ -n "$line" ] && usb=1
+iface=""; ifstatus=absent
+for i in $(ifconfig -l); do
+	if ifconfig "$i" 2>/dev/null | grep -q "$MAC"; then iface=$i; ifstatus=$(ifconfig "$i" | awk '/status:/{print $2}'); fi
+done
+ping=0; sh=0; tel=0; ftp=0
+if [ -n "$iface" ] && [ "$ifstatus" = active ]; then
+	ping -c1 -t1 -b "$iface" 192.168.1.10 >/dev/null 2>&1 && ping=1
+	if [ $ping = 1 ]; then
+		nc -z -G 2 192.168.1.10 2323 >/dev/null 2>&1 && sh=1
+		nc -z -G 2 192.168.1.10 23 >/dev/null 2>&1 && tel=1
+		nc -z -G 2 192.168.1.10 21 >/dev/null 2>&1 && ftp=1
+	fi
+fi
+storage=0; [ -d /Volumes/INTERNAL ] && storage=1
+if [ $sh = 1 ]; then state=LINUX; rc=0
+elif [ $storage = 1 ]; then state=STORAGE; rc=1
+elif [ $ping = 1 ]; then state=LINUX_PARTIAL; rc=2
+elif [ "$ifstatus" = active ]; then state=LINK_UP; rc=2
+elif [ $usb = 1 ]; then state=USB_ONLY; rc=2
+else state=ABSENT; rc=2; fi
+echo "state=$state ping=$ping sh2323=$sh telnet=$tel ftp=$ftp usb=$usb if=${iface:-none}/$ifstatus storage=$storage"
+exit $rc

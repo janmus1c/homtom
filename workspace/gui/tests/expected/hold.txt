@@ -1,0 +1,22 @@
+event: seq=1 up=93784 event=key name=short value=1 page=office
+spawn[backlight]: /bin/homtom-bl 0
+event: seq=2 up=93784 event=screen name=lock value=1 page=office
+event: seq=3 up=93784 event=key name=hold5 value=1 page=office
+spawn[backlight]: /bin/homtom-bl 255
+page: office (locked)
+event: seq=4 up=93784 event=key name=short value=1 page=office
+spawn[backlight]: /bin/homtom-bl 0
+page: office (locked)
+event: seq=5 up=93784 event=key name=hold5 value=1 page=office
+spawn[backlight]: /bin/homtom-bl 255
+spawn[backlight]: /bin/homtom-bl 0
+page: office (locked)
+page: office (locked)
+event: seq=6 up=93784 event=key name=long value=1 page=office
+spawn[backlight]: /bin/homtom-bl 255
+event: seq=7 up=93784 event=screen name=unlock value=1 page=office
+page: system
+page: office
+event: seq=8 up=93784 event=key name=hold10 value=1 page=office
+event: seq=9 up=93784 event=key name=long value=1 page=office
+page: office

@@ -1,0 +1,13 @@
+battery_pct_est=73
+charging=1
+external_power=1
+light_raw=412
+uptime_s=93784
+gga=$GPGGA,120000.00,0000.0000,N,00000.0000,E,1,07,1.2,48.6,M,0.0,M,,*00
+rmc=$GPRMC,120000.00,A,0000.0000,N,00000.0000,E,13.4,87.5,010100,,,A*00
+gps_aid=OK 12:00
+bt_visible_s=275
+bt_visible=open
+mic_level=-38
+mic_state=ok
+mic_peak=-12

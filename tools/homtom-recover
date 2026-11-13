@@ -1,0 +1,14 @@
+#!/bin/bash
+# Restore the previous working ttsystem when a staged image does not come up. Waits for the device to show STORAGE
+# (a hung or resetting unit passes through the bootloader's storage window; the watchdog arms from kernel boot),
+# copies INTERNAL:/ttsystem.prev over ttsystem, ejects, waits for LINUX. Usage: homtom-recover [wait_seconds]
+set -u
+d=$(dirname "$0"); max=${1:-900}
+"$d/homtom-state" | grep -q "state=LINUX " && { echo "device is already in LINUX"; exit 0; }
+echo "waiting up to ${max}s for STORAGE..."
+"$d/homtom-wait" STORAGE "$max" >/dev/null || { echo "no storage mode seen"; exit 1; }
+for i in $(seq 1 15); do [ -f /Volumes/INTERNAL/ttsystem.lab2613 ] && break; sleep 2; done
+[ -f /Volumes/INTERNAL/ttsystem.lab2613 ] || { echo "INTERNAL not recognised"; exit 1; }
+[ -f /Volumes/INTERNAL/ttsystem.prev ] || { echo "no ttsystem.prev"; exit 1; }
+cp /Volumes/INTERNAL/ttsystem.prev /Volumes/INTERNAL/ttsystem && sync && cmp /Volumes/INTERNAL/ttsystem.prev /Volumes/INTERNAL/ttsystem && echo "restored ttsystem.prev" || { echo "restore FAILED, not ejecting"; exit 1; }
+"$d/homtom-to-linux" 300 | tail -1

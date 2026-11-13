@@ -1,0 +1,6 @@
+#!/bin/bash
+# Declare the ttsystem the device is running (after you verified the boot) as known good: the next homtom-stage will keep it
+# as ttsystem.prev. Needs state LINUX.
+d=$(dirname "$0")
+"$d/homtom-state" >/dev/null || { echo "device not in LINUX state"; exit 1; }
+"$d/homtom-sh" '[ -f /mnt/internal/ttsystem.lab2613 ] && touch /mnt/internal/homtom/current.good && sync && echo marked' 8

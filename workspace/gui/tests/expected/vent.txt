@@ -1,0 +1,4 @@
+event: seq=1 up=93784 event=ha name=vent_onoff value=press page=office
+event: seq=2 up=93784 event=ha name=vent_high value=press page=office_vent
+event: seq=3 up=93784 event=ha name=vent_onoff value=press page=office_vent
+page: office

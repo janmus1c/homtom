@@ -1,0 +1,19 @@
+#!/bin/busybox sh
+# Bring the CSR BC4 to the BCSP active state and make it discoverable as "homtom".
+# Needs hcictl (tools/devtools). Raw BCSP handshake by hand (the kernel BCSP driver does not do link establishment):
+# chip sends SYNC -> host SYNC, SYNC_RESP, CONFIG, CONFIG_RESP (CRC-less frames, 8E1 at 115200).
+homtom-hw uartpins
+devmem 0x56000014 0 2 > /dev/null		# BT_MODE low
+devmem 0x560000D4 0 0x200 > /dev/null; sleep 1	# BT_RESET low
+devmem 0x560000D4 0x200 0x200 > /dev/null; sleep 1
+stty -F /dev/ttySAC1 115200 raw -echo -crtscts cs8 parenb -parodd
+exec 7> /dev/ttySAC1
+for f in '\0300\0000\0101\0000\0276\0332\0334\0355\0355\0300' \
+	 '\0300\0000\0101\0000\0276\0254\0257\0357\0356\0300' \
+	 '\0300\0000\0101\0000\0276\0255\0357\0357\0357\0300' \
+	 '\0300\0000\0101\0000\0276\0336\0255\0320\0320\0300'; do
+	echo -ne "$f" >&7
+	sleep 1
+done
+exec 7>&-
+echo "BCSP active; attach with hciattach /dev/ttySAC1 1 then hcictl"

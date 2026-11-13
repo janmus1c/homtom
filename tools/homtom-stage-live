@@ -1,0 +1,22 @@
+#!/bin/bash
+# Stage a ttsystem from the RUNNING device (no storage mode): upload to RAM, copy to /mnt/internal/ttsystem in the
+# background (FAT is slow; a closed shell must not abort the copy), wait for the full size, read back over FTP and cmp on the Mac (the device has no cmp/md5sum).
+# The previous ttsystem is kept as ttsystem.prev only if it is the right size to be a complete image.
+# Usage: homtom-stage-live FILE   then: homtom-sh reboot; homtom-wait LINUX   (recovery of a bad image needs storage mode)
+set -e
+d=$(dirname "$0"); f=$1; size=$(stat -f %z "$f")
+"$d/homtom-sh" 'rm -f /tmp/stage.done /tmp/ttsystem.new' 2 > /dev/null
+"$d/homtom-put" "$f" /tmp/ttsystem.new
+# INTERNAL (moviNAND) is the card holding ttsystem.lab2613; never trust the mmcblk numbering or /mnt/internal (it may be the SD card).
+"$d/homtom-sh" 'mkdir -p /mnt/inand; mountpoint -q /mnt/inand || mount -t vfat -o rw /dev/mmcblk0 /mnt/inand; mount -o remount,rw /mnt/inand
+[ -e /mnt/inand/ttsystem.lab2613 ] && echo guard-ok
+' 2 | grep -q guard-ok || { echo "mmcblk0 is not INTERNAL (no ttsystem.lab2613): refusing" >&2; exit 1; }
+"$d/homtom-sh" '(cp /mnt/inand/ttsystem /mnt/inand/ttsystem.prev; cp /tmp/ttsystem.new /mnt/inand/ttsystem && sync && echo ok > /tmp/stage.done) > /dev/null 2>&1 &
+echo started' 2 > /dev/null
+for i in $(seq 1 90); do
+	sleep 4
+	"$d/homtom-sh" 'cat /tmp/stage.done 2>/dev/null' 2 | grep -q '^ok' && { "$d/homtom-sh" 'rm -f /tmp/ttsystem.new' 2 >/dev/null
+		timeout 120 curl -s ftp://192.168.1.10/mnt/inand/ttsystem -o /tmp/ttsystem.back && cmp -s /tmp/ttsystem.back "$f" || { echo "READBACK MISMATCH" >&2; exit 1; }
+		echo "staged and verified $(shasum -a 256 "$f" | cut -c1-16) ($size bytes)"; exit 0; }
+done
+echo "staging NOT verified" >&2; exit 1

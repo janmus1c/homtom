@@ -1,0 +1,7 @@
+event: seq=1 up=93784 event=press name=lights_on value=1 page=scenes
+event: seq=2 up=93784 event=press name=good_night value=1 page=scenes
+event: seq=3 up=93784 event=set name=backlight value=20 page=scenes
+spawn[backlight]: /bin/homtom-bl 51
+event: seq=4 up=93784 event=set name=backlight value=100 page=scenes
+spawn[backlight]: /bin/homtom-bl 255
+event: seq=5 up=93784 event=press name=away value=1 page=scenes

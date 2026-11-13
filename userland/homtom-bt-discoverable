@@ -1,0 +1,7 @@
+#!/bin/busybox sh
+# After homtom-bt-up + hciattach + hcictl up: name "homtom", class 0x280408, inquiry+page scan.
+N=""; i=0; while [ $i -lt 242 ]; do N="$N 00"; i=$((i+1)); done
+hcictl cmd 03 0c 00
+hcictl cmd 13 0c f8 68 6f 6d 74 6f 6d $N
+hcictl cmd 24 0c 03 08 04 28
+hcictl cmd 1a 0c 01 03

@@ -1,0 +1,34 @@
+#!/bin/busybox sh
+# Start the touch screen UI: calibrated touch events ("x y down|move|up") become the GUI's "t x y" / "up" lines.
+# Respawns if either side exits. Skipped when INTERNAL carries homtom/gui.disable (keeps the console visible for debugging).
+[ -f /mnt/internal/homtom/gui.disable ] && exit 0
+homtom-lock ui $$ || exit 0
+# the configurable UI (INTERNAL:/homtom/ui.conf, built-in dashboard when missing); gui.legacy selects the fixed dashboard
+GUI=homtom-gui-cfg
+[ -f /mnt/internal/homtom/gui.legacy ] && GUI=homtom-gui
+# /tmp/ui.in is a named pipe the GUI reads as its stdin next to the real touches: lines written to it ("t X Y", "up",
+# "key short|long") arrive exactly like touch events (tools/homtom-tap). Without a pipe the pipeline is the original one.
+touch_lines() {
+	homtom-touch events 2> /dev/null | while read x y e; do
+		[ "$e" = move ] || echo "$x $y $e" > /tmp/touch.last
+		case $e in
+		up) echo up ;;
+		*) echo t $x $y ;;
+		esac
+	done
+}
+[ -p /tmp/ui.in ] || { rm -f /tmp/ui.in; mknod /tmp/ui.in p 2> /dev/null; }
+fails=0
+while :; do
+	rm -f /tmp/gui.ready
+	t0=$(cut -d. -f1 /proc/uptime)
+	if [ -p /tmp/ui.in ]; then
+		touch_lines > /tmp/ui.in | $GUI < /tmp/ui.in > /tmp/gui.log 2>&1
+	else
+		touch_lines | $GUI > /tmp/gui.log 2>&1
+	fi
+	# three exits within 20 s each: the UI is crash-looping, show the console (docs/QUIET_BOOT.md)
+	[ $(($(cut -d. -f1 /proc/uptime) - t0)) -lt 20 ] && fails=$((fails + 1)) || fails=0
+	[ $fails -ge 3 ] && { echo "homtom-ui: GUI exited 3 times within 20 s, console unmuted" > /dev/kmsg; echo 0 > /sys/kernel/homtom_splash; }
+	sleep 2
+done

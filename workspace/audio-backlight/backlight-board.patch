@@ -1,0 +1,108 @@
+--- a/kernel/homtom/mach-homtom-go630.c	2026-11-07 11:34:58
++++ b/kernel/homtom/mach-homtom-go630.c	2026-11-07 11:34:58
+@@ -21,6 +21,8 @@
+ #include <linux/platform_data/s3c-hsudc.h>
+ #include <linux/memblock.h>
+ #include <linux/pm.h>
++#include <linux/pwm.h>
++#include <linux/pwm_backlight.h>
+ #include <linux/reboot.h>
+ #include <linux/workqueue.h>
+ #include <linux/kobject.h>
+@@ -120,11 +122,67 @@
+ 	.cd_type	= S3C_SDHCI_CD_PERMANENT,
+ };
+ 
++/*
++ * Backlight: CAT3238 driven by timer 0 on GPB0 (TOUT0, function 2), not inverted. Stock s3c_bl.c uses
++ * a 0-100 level over a range of 160 (tcmp = level * tcnt / 160), so the stock ceiling is 100/160 of
++ * full duty; timer 0 is already in the pwm-samsung output mask (timers 3/4 are the clocksource).
++ * The pin stays a GPIO driven high from boot until pwm_backlight probes, so the screen is lit meanwhile.
++ */
++#define HOMTOM_BL_RANGE		160
++#define HOMTOM_BL_STOCK_MAX	100
++#define HOMTOM_BL_PERIOD_NS	1000000		/* 1000 Hz, Sharp LQ043T1; Samsung LTE430WQ: 543773 (1839 Hz) */
++
+ static void homtom_lcd_gpio(void)
+ {
+ 	gpio_request_one(S3C2410_GPB(0), GPIOF_OUT_INIT_HIGH, "bl-pwm");
+ }
+ 
++static int homtom_bl_init(struct device *dev)
++{
++	s3c_gpio_setpull(S3C2410_GPB(0), S3C_GPIO_PULL_NONE);
++	s3c_gpio_cfgpin(S3C2410_GPB(0), S3C_GPIO_SFN(2));
++	return 0;
++}
++
++/* Level 0 parks the pin low as a GPIO (stock s3c_bl.c:199-206); any other level hands it to TOUT0. */
++static int homtom_bl_notify(struct device *dev, int brightness)
++{
++	if (brightness > HOMTOM_BL_STOCK_MAX)
++		brightness = HOMTOM_BL_STOCK_MAX;
++	if (!brightness) {
++		gpio_direction_output(S3C2410_GPB(0), 0);
++	} else {
++		s3c_gpio_cfgpin(S3C2410_GPB(0), S3C_GPIO_SFN(2));
++	}
++	return brightness;
++}
++
++static void homtom_bl_exit(struct device *dev)
++{
++	gpio_direction_output(S3C2410_GPB(0), 1);
++}
++
++static struct pwm_lookup homtom_pwm_lookup[] = {
++	PWM_LOOKUP("samsung-pwm", 0, "pwm-backlight", NULL, HOMTOM_BL_PERIOD_NS, PWM_POLARITY_NORMAL),
++};
++
++static struct platform_pwm_backlight_data homtom_bl_data = {
++	.max_brightness	= HOMTOM_BL_RANGE,	/* linear table, scale = 160 like the stock range */
++	.dft_brightness	= HOMTOM_BL_STOCK_MAX,
++	.init		= homtom_bl_init,
++	.notify		= homtom_bl_notify,
++	.exit		= homtom_bl_exit,
++};
++
++static struct platform_device homtom_backlight = {
++	.name	= "pwm-backlight",
++	.id	= -1,
++	.dev	= {
++		.parent		= &samsung_device_pwm.dev,
++		.platform_data	= &homtom_bl_data,
++	},
++};
++
+ static void homtom_hsudc_gpio_init(void)
+ {
+ 	s3c2410_modify_misccr(S3C2410_MISCCR_USBHOST |
+@@ -193,6 +251,8 @@
+ 	&s3c_device_hsmmc1,
+ 	&s3c_device_usb_hsudc,
+ 	&s3c2443_device_dma,
++	&samsung_device_pwm,
++	&homtom_backlight,
+ };
+ 
+ static void homtom_paint_phys(unsigned long phys, u16 color)
+@@ -506,6 +566,7 @@
+ 			pd->phy_uninit = homtom_hsudc_phy_uninit;
+ 		}
+ 	}
++	pwm_add_table(homtom_pwm_lookup, ARRAY_SIZE(homtom_pwm_lookup));
+ 	platform_add_devices(homtom_devices, ARRAY_SIZE(homtom_devices));
+ 	homtom_display_mark("11_post_devices", HOMTOM_COL_ORANGE);
+ }
+--- a/kernel/homtom/homtom_defconfig	2026-11-07 11:34:58
++++ b/kernel/homtom/homtom_defconfig	2026-11-07 11:34:58
+@@ -290,7 +290,8 @@
+ CONFIG_FB_S3C2410=y
+ # CONFIG_FB_S3C is not set
+ # CONFIG_FB_SM501 is not set
+-CONFIG_BACKLIGHT_PWM=m
++CONFIG_BACKLIGHT_CLASS_DEVICE=y
++CONFIG_BACKLIGHT_PWM=y
+ CONFIG_SOUND=y
+ CONFIG_SND=y
+ CONFIG_SND_VERBOSE_PRINTK=y

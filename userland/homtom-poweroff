@@ -1,0 +1,13 @@
+#!/bin/busybox sh
+# Power the unit off: same SWRST path as /bin/reboot, but INFORM0 is 1 ("Power down" for TTBL) instead of 5.
+# homtom-keyd runs this only after the power key was released (TTBL boots on when it finds the key held).
+# After this the unit stays dark until the power key is pressed (docs/POWER_KEY.md). INFORM0 is written as 1 only:
+# never 3 (stage 1 may jump to INFORM1), never 5 or 9 (those are "Reboot").
+sync
+umount /mnt/internal 2> /dev/null
+devmem 0x4C000070 1 > /dev/null
+devmem 0x4C000044 0x533C2443 > /dev/null
+# SWRST did nothing: let the watchdog reset instead; INFORM0 is still 1, so the result is the same power down.
+sleep 3
+touch /tmp/wdt-stop
+sleep 30

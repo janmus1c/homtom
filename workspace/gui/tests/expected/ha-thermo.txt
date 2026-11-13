@@ -1,0 +1,3 @@
+event: seq=1 up=93784 event=ha name=office_clim value=mode:cool page=office
+event: seq=2 up=93784 event=ha name=office_clim value=set_target:20.0 page=office
+event: seq=3 up=93784 event=ha name=office_clim value=set_target:20.5 page=office

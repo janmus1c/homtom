@@ -1,0 +1,3 @@
+event: seq=1 up=93784 event=ha name=office_hue1 value=set_bri:21 page=light_hue1
+event: seq=2 up=93784 event=ha name=office_hue1 value=set_bri:52 page=light_hue1
+event: seq=3 up=93784 event=ha name=office_hue1 value=set_bri:83 page=light_hue1

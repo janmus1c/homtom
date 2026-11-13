@@ -1,0 +1,213 @@
+#!/bin/busybox sh
+# Keeps the USB Ethernet link to the host alive without a reboot. When the bus still looks configured but the host has
+# stopped completing round trips, drop and raise the D+ pull-up: the host sees a replug and resets the bus, and the
+# reset flushes every endpoint queue of s3c-hsudc. Never soft_connect or a UDC unbind: on this board a UDC stop/start
+# leaves USB dead until a reboot (docs/LESSONS.md). Design and evidence: docs/ROBUSTNESS.md.
+#
+# Usage: homtom-netwatch [-n] [--once] [--test]
+#   -n      dry run: decide and log as usual, never touch the pull-up
+#   --once  sample, probe the host once, print the verdict and the action it would take, exit
+#   --test  dry run that writes nothing on the device: log to stdout, no lock, no state file, no dmesg capture
+# Files: INTERNAL:/homtom/netwatch.disable (exit at start), INTERNAL:/homtom/netwatch.dryrun (same as -n),
+#   INTERNAL:/homtom/logs/net.log (events; 64 KB plus one .1 rotation), INTERNAL:/homtom/logs/net-dead.dmesg (dmesg
+#   at the last recovery), /tmp/net.state ("STATE since-uptime detail" for a local status screen).
+# Environment (tests): NW_TICK NW_SUSPECT NW_SETTLE NW_MINGAP NW_MAXGAP NW_PERHOUR NW_ENUM_STUCK NW_REPROBE NW_MAXRUN,
+#   NW_HOST, NW_IF, NW_FAKE_DEAD=1 (TCP evidence is ignored, every probe fails, the host counts as having answered before).
+
+IF=${NW_IF:-usb0}
+HOST=${NW_HOST:-192.168.1.100}
+TICK=${NW_TICK:-10}
+SUSPECT=${NW_SUSPECT:-60}
+SETTLE=${NW_SETTLE:-40}
+MINGAP=${NW_MINGAP:-120}
+MAXGAP=${NW_MAXGAP:-1800}
+PERHOUR=${NW_PERHOUR:-6}
+ENUM_STUCK=${NW_ENUM_STUCK:-90}
+REPROBE=${NW_REPROBE:-300}
+MAXRUN=${NW_MAXRUN:-0}
+D=/mnt/internal/homtom
+PULLUP=/sys/kernel/homtom_usb_pullup
+
+DRY=0; ONCE=0; TEST=0
+for a; do
+	case $a in
+	-n) DRY=1 ;;
+	--once) ONCE=1 ;;
+	--test) TEST=1; DRY=1 ;;
+	*) echo "usage: homtom-netwatch [-n] [--once] [--test]"; exit 2 ;;
+	esac
+done
+[ $TEST = 0 ] && [ -f $D/netwatch.disable ] && exit 0
+[ -f $D/netwatch.dryrun ] && DRY=1
+# recovery is only enabled once the pull-up toggle has been proven on this unit: touch INTERNAL:/homtom/netwatch.live
+[ -f $D/netwatch.live ] || DRY=1
+
+LOG=; STATE=; EVID=
+if [ $TEST = 0 ] && [ $ONCE = 0 ]; then
+	homtom-lock netwatch $$ || exit 0
+	LOG=/tmp/net.log
+	# /mnt/internal can be the SD card at boot; only INTERNAL carries ttsystem.lab2613
+	if [ -f /mnt/internal/ttsystem.lab2613 ] && mkdir -p $D/logs 2> /dev/null; then LOG=$D/logs/net.log; EVID=$D/logs/net-dead.dmesg; fi
+	STATE=/tmp/net.state
+fi
+
+up() { read u _ < /proc/uptime; echo ${u%.*}; }
+log() {
+	l="$(date '+%F %T' 2> /dev/null) up=$(up) $*"
+	if [ -z "$LOG" ]; then echo "$l"; return; fi
+	[ "$(wc -c < $LOG 2> /dev/null || echo 0)" -gt 65536 ] && mv -f $LOG $LOG.1
+	echo "$l" >> $LOG
+	echo "homtom-net: $*" > /dev/kmsg 2> /dev/null
+}
+
+st=; st_since=$(up)
+setstate() {
+	[ "$1" = "$st" ] && return
+	st=$1; st_since=$(up)
+	log "state $1: $2"
+	[ -n "$STATE" ] && echo "$1 $st_since $2" > $STATE.n && mv -f $STATE.n $STATE
+}
+
+rd() { cat "$1" 2> /dev/null || echo "$2"; }
+sample() {
+	carrier=$(rd /sys/class/net/$IF/carrier 0)
+	udc=$(cat /sys/class/udc/*/state 2> /dev/null); [ -n "$udc" ] || udc=none
+	rx=$(rd /sys/class/net/$IF/statistics/rx_packets 0)
+	tx=$(rd /sys/class/net/$IF/statistics/tx_packets 0)
+	cc=$(rd /sys/class/net/$IF/carrier_changes 0)
+	set -- $(grep -e '^Tcp: [0-9]' /proc/net/snmp 2> /dev/null); popen=${7:-0}
+	set -- $(grep -e 's3c-udc' /proc/interrupts 2> /dev/null); irq=${2:-0}
+}
+snap() { echo "carrier=$carrier udc='$udc' rx=$rx tx=$tx irq=$irq tcp_passive_opens=$popen carrier_changes=$cc"; }
+base() { b_t=$(up); b_rx=$rx; b_tx=$tx; b_irq=$irq; b_pop=$popen; b_cc=$cc; }
+
+# Three concurrent echo requests. s3c-hsudc can hold the newest received packet in its OUT FIFO until the next one
+# arrives, so a lone request can lose its reply; with three in flight at least one reply is pushed out.
+probe() {
+	[ -n "$NW_FAKE_DEAD" ] && return 1
+	ping $HOST > /dev/null 2>&1 & p1=$!
+	ping $HOST > /dev/null 2>&1 & p2=$!
+	ping $HOST > /dev/null 2>&1; r3=$?
+	wait $p1; r1=$?
+	wait $p2; r2=$?
+	[ $r1 = 0 ] || [ $r2 = 0 ] || [ $r3 = 0 ]
+}
+
+# What the counters did since the last proof of a round trip: tells the next incident apart from the last one.
+classify() {
+	drx=$((rx - b_rx)); dtx=$((tx - b_tx)); dirq=$((irq - b_irq))
+	if [ $drx -gt 0 ] && [ $dtx -eq 0 ]; then sig=tx-stall
+	elif [ $drx -gt 0 ]; then sig=replies-lost
+	elif [ $dirq -gt 0 ]; then sig=rx-stall
+	else sig=bus-silent; fi
+	sig="$sig over $(($(up) - b_t))s: rx+$drx tx+$dtx udc_irq+$dirq"
+}
+
+gap=$MINGAP; last_fix=-100000; hour_start=$(up); hour_n=0; series=0; why=
+can_fix() {
+	now=$(up)
+	[ $((now - hour_start)) -ge 3600 ] && { hour_start=$now; hour_n=0; }
+	[ $hour_n -ge $PERHOUR ] && { why="hourly cap of $PERHOUR reached"; return 1; }
+	[ $((now - last_fix)) -lt $gap ] && { why="next attempt allowed in $((gap - now + last_fix))s"; return 1; }
+	return 0
+}
+fix() {
+	last_fix=$(up); hour_n=$((hour_n + 1)); series=$((series + 1)); held=0
+	off=3; [ $series -gt 1 ] && off=10
+	if [ $DRY = 1 ]; then log "DRY RUN: would drop the D+ pull-up for ${off}s ($1)"; return; fi
+	[ -n "$EVID" ] && dmesg > $EVID 2> /dev/null
+	log "recover #$series: D+ pull-up off ${off}s ($1)"
+	echo 0 > $PULLUP
+	sleep $off
+	echo 1 > $PULLUP
+}
+
+if [ $DRY = 0 ]; then
+	# never leave the pull-up low (that is an unplugged cable until the next boot)
+	trap 'echo 1 > $PULLUP 2> /dev/null; exit 0' HUP INT TERM
+fi
+
+sample
+if [ $ONCE = 1 ]; then
+	echo "$(snap)"
+	if probe; then echo "probe: host $HOST answered; action: none"; exit 0; fi
+	b_t=$(up); b_rx=$rx; b_tx=$tx; b_irq=$irq
+	sleep ${NW_TICK:-5}; sample; classify
+	echo "probe: host $HOST did not answer; last ${NW_TICK:-5}s: $sig"
+	if [ "$udc" = configured ] && [ "$carrier" = 1 ]; then echo "action: the loop would toggle the pull-up once this lasts ${SUSPECT}s and the host has answered a probe before"
+	else echo "action: none (udc='$udc' carrier=$carrier: host absent, asleep or still enumerating)"; fi
+	exit 0
+fi
+
+base
+host_icmp=0; last_probe=-100000; t0=$(up); held=0
+[ -n "$NW_FAKE_DEAD" ] && host_icmp=1
+log "start pid=$$ dry=$DRY if=$IF host=$HOST $(snap)"
+while :; do
+	sleep $TICK
+	[ $MAXRUN -gt 0 ] && [ $(($(up) - t0)) -ge $MAXRUN ] && { log "stop after ${MAXRUN}s"; exit 0; }
+	sample; now=$(up)
+	[ $TEST = 1 ] && echo "tick up=$now state=$st $(snap)"
+
+	# The host re-enumerated by itself: give it a full window before judging.
+	[ "$cc" != "$b_cc" ] && { base; continue; }
+
+	case "$udc" in
+	configured) ;;
+	suspended | "not attached" | none) setstate NOHOST "udc=$udc"; base; continue ;;
+	*)
+		setstate ENUM "udc=$udc"
+		[ $((now - st_since)) -ge $ENUM_STUCK ] && can_fix && fix "enumeration stuck in udc=$udc for $((now - st_since))s"
+		continue ;;
+	esac
+	if [ "$carrier" != 1 ]; then
+		# configured, but the host driver never activated the ECM data interface (the stuck NETWORK_CONNECTION case)
+		setstate INACTIVE "configured, carrier=0"
+		[ $((now - st_since)) -ge $ENUM_STUCK ] && can_fix && fix "ecm data interface inactive for $((now - st_since))s"
+		continue
+	fi
+
+	if [ -z "$NW_FAKE_DEAD" ] && [ "$popen" != "$b_pop" ]; then
+		base; series=0; gap=$MINGAP
+		setstate OK "host completes TCP handshakes"
+		# learn once per boot whether the host answers ICMP, so a later dead link can be confirmed by a probe
+		if [ $host_icmp = 0 ] && [ $((now - last_probe)) -ge $REPROBE ]; then last_probe=$now; probe && host_icmp=1; fi
+		continue
+	fi
+	[ $((now - b_t)) -lt $SUSPECT ] && continue
+
+	classify
+	last_probe=$now
+	if probe; then
+		host_icmp=1; base; series=0; gap=$MINGAP
+		setstate OK "host answers ping (no TCP from it for ${SUSPECT}s)"
+		continue
+	fi
+	# A host that never answered ICMP (firewall) may just be idle: wait three times as long before acting.
+	if [ $host_icmp = 0 ] && [ $((now - b_t)) -lt $((3 * SUSPECT)) ]; then
+		setstate QUIET "no answer, and the host has not answered a ping this boot; waiting ($sig)"
+		continue
+	fi
+	setstate DEAD "$sig"
+	if can_fix; then
+		fix "$sig"
+		sleep $SETTLE
+		sample
+		if probe; then log "recovered: host answers after the pull-up toggle ($(snap))"; base; setstate OK "recovered"; series=0; gap=$MINGAP
+		else
+			gap=$((gap * 2)); [ $gap -gt $MAXGAP ] && gap=$MAXGAP
+			log "still dead after recovery ($(snap)); next attempt in ${gap}s"
+			b_cc=$cc
+			# three pull-up recoveries in a row did not bring the host back: a reboot re-enumerates everything (the
+			# uptime check keeps a boot loop impossible, the series only reaches three after several minutes)
+			if [ $DRY = 0 ] && [ $series -ge 3 ] && [ $(up) -ge 900 ]; then
+				log "escalating: reboot after $series failed recoveries"
+				sync
+				/bin/reboot
+			fi
+		fi
+	else
+		[ $held = 1 ] || log "no action: $why"
+		held=1
+	fi
+done

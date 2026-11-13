@@ -1,0 +1,3 @@
+event: seq=1 up=93784 event=key name=short value=1 page=light_hue2
+event: seq=2 up=93784 event=key name=short value=1 page=light_amb
+event: seq=3 up=93784 event=key name=short value=1 page=office

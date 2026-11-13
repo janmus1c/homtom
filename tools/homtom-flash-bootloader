@@ -1,0 +1,20 @@
+#!/bin/sh
+# Flash the homtom bootloader graphics (NOR blocks 0x20000-0x3FFFF) over the USB network link.
+# Dry run by default; pass --write to erase and program. Settings at 0x40000+ are never touched.
+set -eu
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+IMAGE=${IMAGE:-$ROOT/artifacts/homtom-nor/mtd0-homtom.bin}
+TT="python3 -I $ROOT/scripts/tt.py"
+IFACE=$(python3 -I -c "import sys; sys.path.insert(0, '$ROOT/scripts'); import tt; print(tt.gadget_interface())")
+SHA=$(shasum -a 256 "$IMAGE" | cut -d' ' -f1)
+CHECK=$(mktemp)
+trap 'rm -f "$CHECK"' EXIT
+curl -sS --interface "$IFACE" --max-time 300 -T "$IMAGE" ftp://192.168.1.10/tmp/mtd0-homtom.bin
+$TT "rawcopy /dev/mtd0 /mnt/sdcard/homtom/dump/mtd0-before-flash.bin 0 524288; ls -l /tmp/mtd0-homtom.bin" 120
+curl -sS --interface "$IFACE" --max-time 300 ftp://192.168.1.10/tmp/mtd0-homtom.bin -o "$CHECK"
+[ "$(shasum -a 256 "$CHECK" | cut -d' ' -f1)" = "$SHA" ] || { echo "upload verification failed"; exit 1; }
+# Detached with a persistent log (docs/flash-safety.md): a hung kernel cannot hide the last step.
+LOG=/mnt/sdcard/homtom/logs/norflash.log
+$TT "umount /mnt/flash 2>/dev/null; (norflash /dev/mtd0 /tmp/mtd0-homtom.bin ${START:-0x20000} ${END:-0x40000} ${1:-} >$LOG 2>&1; echo rc=\$? >>$LOG; sync) </dev/null >/dev/null 2>&1 &" 60
+sleep 5
+$TT "cat $LOG" 60

@@ -1,0 +1,3 @@
+#!/bin/busybox sh
+# JSON status for local consumers (homtom-btd): the cached document from homtom-statusd, so nothing else touches the ADC.
+wget -q -O - http://127.0.0.1:8080/ 2>/dev/null

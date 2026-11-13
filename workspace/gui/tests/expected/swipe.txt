@@ -1,0 +1,12 @@
+event: seq=1 up=93784 event=key name=short value=1 page=b
+event: seq=2 up=93784 event=key name=short value=1 page=a
+event: seq=3 up=93784 event=key name=short value=1 page=a
+event: seq=4 up=93784 event=set name=volume value=80 page=a
+event: seq=5 up=93784 event=key name=short value=1 page=a
+event: seq=6 up=93784 event=press name=a1 value=1 page=a
+event: seq=7 up=93784 event=press name=away value=1 page=a
+event: seq=8 up=93784 event=key name=short value=1 page=d1
+event: seq=9 up=93784 event=key name=short value=1 page=d2
+event: seq=10 up=93784 event=key name=short value=1 page=d2
+event: seq=11 up=93784 event=key name=short value=1 page=b
+event: seq=12 up=93784 event=key name=short value=1 page=lone

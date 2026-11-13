@@ -1,0 +1,2 @@
+event: seq=1 up=93784 event=reboot name=storage value=1 page=power
+spawn[reboot]: /bin/reboot

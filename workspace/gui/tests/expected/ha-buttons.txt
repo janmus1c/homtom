@@ -1,0 +1,5 @@
+event: seq=1 up=93784 event=ha name=office_all value=set_bri:0 page=ha
+event: seq=2 up=93784 event=ha name=office_scene value=press page=ha
+event: seq=3 up=93784 event=ha name=office_clim value=mode:cool page=ha
+event: seq=4 up=93784 event=ha name=office_hue1 value=set_ct:2700 page=ha
+event: seq=5 up=93784 event=ha name=office_ac value=toggle page=ha

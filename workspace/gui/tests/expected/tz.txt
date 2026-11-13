@@ -1,0 +1,6 @@
+tz-file: 60,eu
+event: seq=1 up=93784 event=tz name=60,eu value=1 page=tz1
+tz-file: 90
+event: seq=2 up=93784 event=tz name=90 value=1 page=tz2
+tz-file: auto
+event: seq=3 up=93784 event=tz name=auto value=1 page=tz1

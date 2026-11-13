@@ -1,0 +1,31 @@
+#!/bin/busybox sh
+# homtom-ui-extra KEY=VALUE...: set these keys in /tmp/ui.extra and keep every other key in it. homtom-statusd merges the
+# file into /tmp/homtom-ui.txt (the screen) and its JSON ("extra"). Keys are [a-z0-9_]; statusd drops lines longer than
+# 64 characters and values with '"' or '\'. The new file is written next to the old one and renamed over it, under a short
+# lock, so two wrappers writing at the same time keep each other's keys.
+F=/tmp/ui.extra
+i=0
+while ! homtom-lock uiextra $$; do
+	i=$((i + 1))
+	[ $i -ge 5 ] && break
+	sleep 1
+done
+ex=
+for kv; do
+	k=${kv%%=*}
+	case $kv in *=*) ;; *) continue ;; esac
+	case $k in '' | *[!a-z0-9_]*) continue ;; esac
+	ex="$ex -e ^$k="
+done
+{
+	[ -n "$ex" ] && [ -f $F ] && grep -v $ex $F
+	for kv; do
+		k=${kv%%=*}
+		case $kv in *=*) ;; *) continue ;; esac
+		case $k in '' | *[!a-z0-9_]*) continue ;; esac
+		echo "$kv"
+	done
+} > $F.$$
+mv -f $F.$$ $F
+[ "$(cat /tmp/lock.uiextra 2> /dev/null)" = "$$" ] && rm -f /tmp/lock.uiextra
+exit 0

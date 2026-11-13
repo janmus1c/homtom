@@ -1,0 +1,24 @@
+#!/bin/bash
+# Run a homtom-touch mode on the device and report the result. Usage: homtom-touch-run MODE [options]
+#   homtom-touch-run cal            5-point calibration (saves /mnt/internal/homtom/touch.cal)
+#   homtom-touch-run targets|draw|drag|slide|raw|scan [options]
+# The user touches the screen; this script waits (up to 300 s) for the tool to exit, then prints its log.
+set -u
+d=$(dirname "$0")
+mode=${1:?usage: homtom-touch-run MODE [options]}; shift
+ok=0; for i in 1 2 3 4; do "$d/homtom-state" >/dev/null && { ok=1; break; }; sleep 1; done
+[ $ok = 1 ] || { echo "device not in LINUX state"; exit 1; }
+"$d/homtom-sh" '[ -x /bin/homtom-touch ] || echo missing' 5 | grep -q missing && {
+	"$d/homtom-put" "$d/devtools/homtom-touch" /tmp/homtom-touch >/dev/null && "$d/homtom-sh" 'chmod +x /tmp/homtom-touch' 5 >/dev/null
+	bin=/tmp/homtom-touch
+} || bin=/bin/homtom-touch
+"$d/homtom-sh" "killall tsk homtom-ts 2>/dev/null; rm -f /tmp/touch.rc /tmp/touch-run.log; ( $bin $mode $* > /tmp/touch-run.log 2>&1 < /dev/null; echo \$? > /tmp/touch.rc ) > /dev/null 2>&1 &" 5 >/dev/null
+echo "started: $bin $mode $*  (touch the screen as prompted; waiting for exit)"
+for i in $(seq 1 150); do
+	sleep 2
+	rc=$(curl -s -m 5 ftp://192.168.1.10/tmp/touch.rc 2>/dev/null) && [ -n "$rc" ] && break
+done
+echo "exit code: ${rc:-timeout}"
+curl -s -m 10 ftp://192.168.1.10/tmp/touch-run.log | tail -n 30
+[ "$mode" = cal ] && { echo "--- touch.cal"; curl -s -m 10 ftp://192.168.1.10/mnt/internal/homtom/touch.cal; }
+exit 0

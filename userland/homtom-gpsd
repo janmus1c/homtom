@@ -1,0 +1,13 @@
+#!/bin/busybox sh
+# Keep the latest GGA/RMC sentences from the SiRF III in /tmp/gga and /tmp/rmc (NMEA 4800 baud on ttySAC2).
+homtom-lock gpsd $$ || exit 0
+homtom-hw gps-on
+while :; do
+	while read l; do
+		case "$l" in
+		\$GPGGA*) echo "$l" > /tmp/gga.n; mv /tmp/gga.n /tmp/gga; ( IFS=,; set -- $l; [ "${7:-0}" != 0 ] && { read u r < /proc/uptime; echo "${u%.*}" > /tmp/gps_ts.n; mv /tmp/gps_ts.n /tmp/gps_ts; } ) ;;
+		\$GPRMC*) echo "$l" > /tmp/rmc.n; mv /tmp/rmc.n /tmp/rmc ;;
+		esac
+	done < /dev/ttySAC2
+	sleep 1
+done

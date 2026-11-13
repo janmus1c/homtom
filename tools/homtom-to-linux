@@ -1,0 +1,11 @@
+#!/bin/bash
+# Leave storage mode: force-unmount and eject INTERNAL and NO NAME (macOS may dissent when the login window is locked,
+# hence unmountDisk force), so the bootloader boots the staged ttsystem; wait for LINUX.
+d=$(dirname "$0")
+sync
+for v in INTERNAL "NO NAME"; do
+	[ -d "/Volumes/$v" ] || continue
+	disk=$(diskutil info "/Volumes/$v" 2>/dev/null | awk '/Part of Whole/{print $4}')
+	[ -n "$disk" ] && { diskutil unmountDisk force "$disk" >/dev/null 2>&1; diskutil eject "$disk" >/dev/null 2>&1; }
+done
+"$d/homtom-wait" LINUX "${1:-120}"

@@ -1,0 +1,8 @@
+#!/bin/bash
+# Wait until the device reaches a state. Usage: homtom-wait LINUX|STORAGE|ABSENT [timeout-seconds=180]
+want=${1:-LINUX}; t=${2:-180}; end=$(( $(date +%s) + t ))
+while [ "$(date +%s)" -lt "$end" ]; do
+	s=$("$(dirname "$0")/homtom-state"); case "$s" in "state=$want "*) echo "$s"; exit 0;; esac
+	sleep 3
+done
+echo "timeout waiting for $want; last: $s"; exit 1

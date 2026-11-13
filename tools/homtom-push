@@ -1,0 +1,26 @@
+#!/bin/sh
+# Install a built ttsystem on a GO 630 running homtom or OpenTom with USB networking, then reboot.
+# Keeps the first replaced image as /mnt/sdcard/ttsystem.opentom for recovery from bootloader USB mode.
+set -eu
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+IMAGE=${1:-$ROOT/build/ttsystem}
+TT="python3 -I $ROOT/scripts/tt.py"
+IFACE=$(python3 -I -c "import sys; sys.path.insert(0, '$ROOT/scripts'); import tt; print(tt.gadget_interface())")
+SIZE=$(wc -c <"$IMAGE" | tr -d ' ')
+$TT 'pidof tcpsvd >/dev/null || (tcpsvd -E 0.0.0.0 21 /usr/sbin/ftpd -w / </dev/null >/dev/null 2>&1 &)' 120 >/dev/null
+curl -sS --interface "$IFACE" --max-time 900 -T "$IMAGE" ftp://192.168.1.10/mnt/sdcard/ttsystem.new
+REMOTE=$($TT 'sync; wc -c </mnt/sdcard/ttsystem.new' 400 | tr -dc 0-9)
+[ "$REMOTE" = "$SIZE" ] || { echo "size mismatch: local $SIZE remote $REMOTE"; exit 1; }
+$TT 'cd /mnt/sdcard && { test -f ttsystem.opentom || cp ttsystem ttsystem.opentom; } && mv ttsystem.new ttsystem && sync && ls -l ttsystem ttsystem.opentom' 300
+echo "installed $SIZE bytes; rebooting"
+$TT 'sync; sync; /mnt/sdcard/opentom/bin/force_reboot' 20 >/dev/null 2>&1 || true
+# With USB connected the bootloader comes back in storage mode; ejecting it boots the new image.
+for i in $(seq 1 60); do [ -d /Volumes/INTERNAL ] && break; sleep 2; done
+if [ -d /Volumes/INTERNAL ]; then
+	sleep 3
+	LOGS=$ROOT/artifacts/device-logs-$(date -u +%Y%m%dT%H%M%SZ)
+	mkdir -p "$LOGS" && cp -p /Volumes/INTERNAL/homtom/logs/* "$LOGS/" 2>/dev/null; echo "logs: $LOGS"
+	DISK=$(diskutil info -plist /Volumes/INTERNAL | plutil -extract ParentWholeDisk raw -)
+	sync
+	diskutil eject "$DISK" >/dev/null && echo "storage mode ejected; booting"
+fi

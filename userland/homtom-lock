@@ -1,0 +1,10 @@
+#!/bin/busybox sh
+# homtom-lock NAME PID: exit 0 when PID now holds the lock NAME, exit 1 when another live process already does.
+# A lock whose owner is gone is taken over, so a crashed launcher never blocks its replacement.
+f=/tmp/lock.$1
+for t in 1 2; do
+	(set -C; echo "$2" > $f) 2> /dev/null && exit 0
+	kill -0 "$(cat $f 2> /dev/null)" 2> /dev/null && exit 1
+	rm -f $f
+done
+exit 1

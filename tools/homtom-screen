@@ -1,0 +1,436 @@
+#!/usr/bin/env -S python3 -I
+"""See the device LCD from the Mac: screenshots, a live view on 127.0.0.1 and pixel diffs. Read-only on the device.
+
+usage: homtom-screen [-o OUT.png] [-z ZOOM] [-s 1|2|4]          one screenshot (default .runtime/screen/shot.png)
+       homtom-screen --watch SECONDS [--port 8731] [--for S]    live view at http://127.0.0.1:8731/ + OUT.png refreshed
+       homtom-screen --diff                                     new shot, diffed against the previous one
+       homtom-screen --diff A [B]                               A against a new shot, or A against B offline
+                                                                (A, B: .hts, unzoomed .png or 24-bit .bmp)
+       homtom-screen --info                                     LCD registers and framebuffer geometry
+       homtom-screen --convert IN.hts|IN.bmp -o OUT.png         decode a device file offline
+
+The device side is tools/devtools/homtom-shot, uploaded to /tmp/homtom-shot when missing or changed. A frame is
+written on the device as /tmp/homtom-shot.hts (RLE RGB565) and fetched over FTP; a copy is kept next to the PNG
+(OUT.hts, the previous one as OUT.prev.hts) so diffs are exact and independent of --zoom.
+Stdlib only (struct, zlib, http.server). The HTTP server binds 127.0.0.1 only.
+"""
+import argparse, array, http.server, json, os, pathlib, struct, subprocess, sys, threading, time, urllib.request, zlib
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+TOOLS = ROOT / "tools"
+LOCAL_BIN = TOOLS / "devtools" / "homtom-shot"
+DEV_BIN = "/tmp/homtom-shot"
+DEV_SHOT = "/tmp/homtom-shot.hts"
+DEV_LIVE = "/tmp/homtom-live.hts"
+FTP = "ftp://192.168.1.10"
+OUTDIR = ROOT / ".runtime" / "screen"
+FLAG_TPAL, FLAG_OFF, FLAG_FALLBACK = 1, 2, 4
+
+
+class Frame:
+    def __init__(self, w, h, px, flags=0, tpal=0, phys=0, seq=0):
+        self.w, self.h, self.px = w, h, px  # px: array('H') of RGB565, row order
+        self.flags, self.tpal, self.phys, self.seq = flags, tpal, phys, seq
+
+    def warnings(self):
+        out = []
+        if self.flags & FLAG_TPAL:
+            out.append(f"TPAL overlay is on (0x{self.tpal:08x}): the panel shows a solid colour, not this framebuffer")
+        if self.flags & FLAG_OFF:
+            out.append("LCD output is disabled (LCDCON1.ENVID=0): the panel is not showing this framebuffer")
+        if self.flags & FLAG_FALLBACK:
+            out.append("LCD registers were implausible; the device used the fixed 0x33f00000 480x272 buffer")
+        return out
+
+
+# ---------------- decoding ----------------
+def _px(raw):
+    a = array.array("H")
+    a.frombytes(bytes(raw))
+    if sys.byteorder == "big":
+        a.byteswap()
+    return a
+
+
+def decode_hts(data):
+    if data[:4] != b"HTS1" or len(data) < 24:
+        raise ValueError("not an HTS1 file")
+    w, h, rle, scale, flags, tpal, phys, seq = struct.unpack_from("<HHBBHIII", data, 4)
+    body = memoryview(data)[24:]
+    if not rle:
+        raw = bytes(body[: w * h * 2])
+    else:
+        out = bytearray()
+        i, n = 0, len(body)
+        while i < n:
+            c = body[i]
+            i += 1
+            if c < 128:
+                k = (c + 1) * 2
+                out += body[i : i + k]
+                i += k
+            else:
+                out += bytes(body[i : i + 2]) * (c - 126)
+                i += 2
+        raw = bytes(out)
+    if len(raw) != w * h * 2:
+        raise ValueError(f"HTS payload decodes to {len(raw)} bytes, expected {w * h * 2}")
+    return Frame(w, h, _px(raw), flags, tpal, phys, seq)
+
+
+def rgb_to_565(r, g, b):
+    return ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)
+
+
+def decode_bmp(data):
+    if data[:2] != b"BM":
+        raise ValueError("not a BMP")
+    off, = struct.unpack_from("<I", data, 10)
+    w, h, _, bpp = struct.unpack_from("<iiHH", data, 18)
+    if bpp != 24:
+        raise ValueError("only 24-bit BMP is supported")
+    flip, h = h > 0, abs(h)
+    rb = (w * 3 + 3) & ~3
+    px = array.array("H", bytes(2 * w * h))
+    for y in range(h):
+        sy = h - 1 - y if flip else y
+        row = data[off + sy * rb : off + sy * rb + w * 3]
+        for x in range(w):
+            b, g, r = row[3 * x], row[3 * x + 1], row[3 * x + 2]
+            px[y * w + x] = rgb_to_565(r, g, b)
+    return Frame(w, h, px)
+
+
+def decode_png(data):
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ValueError("not a PNG")
+    pos, idat, w = 8, bytearray(), 0
+    while pos < len(data):
+        n, typ = struct.unpack_from(">I4s", data, pos)
+        body = data[pos + 8 : pos + 8 + n]
+        if typ == b"IHDR":
+            w, h, depth, ctype, _, _, inter = struct.unpack(">IIBBBBB", body)
+            if depth != 8 or ctype not in (2, 6) or inter:
+                raise ValueError("only 8-bit RGB/RGBA non-interlaced PNG is supported")
+            bpp = 3 if ctype == 2 else 4
+        elif typ == b"IDAT":
+            idat += body
+        pos += 12 + n
+    raw = zlib.decompress(bytes(idat))
+    stride = w * bpp
+    prev = bytearray(stride)
+    px = array.array("H", bytes(2 * w * h))
+    for y in range(h):
+        f = raw[y * (stride + 1)]
+        line = bytearray(raw[y * (stride + 1) + 1 : (y + 1) * (stride + 1)])
+        for i in range(stride):
+            a = line[i - bpp] if i >= bpp else 0
+            b = prev[i]
+            c = prev[i - bpp] if i >= bpp else 0
+            if f == 1:
+                line[i] = (line[i] + a) & 255
+            elif f == 2:
+                line[i] = (line[i] + b) & 255
+            elif f == 3:
+                line[i] = (line[i] + ((a + b) >> 1)) & 255
+            elif f == 4:
+                p = a + b - c
+                pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+                line[i] = (line[i] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 255
+        for x in range(w):
+            px[y * w + x] = rgb_to_565(line[x * bpp], line[x * bpp + 1], line[x * bpp + 2])
+        prev = line
+    return Frame(w, h, px)
+
+
+def load(path):
+    data = pathlib.Path(path).read_bytes()
+    if data[:4] == b"HTS1":
+        return decode_hts(data)
+    if data[:2] == b"BM":
+        return decode_bmp(data)
+    return decode_png(data)
+
+
+# ---------------- PNG output ----------------
+_LUT = None
+
+
+def _lut():
+    global _LUT
+    if _LUT is None:
+        _LUT = [bytes(((p >> 11) * 255 // 31, ((p >> 5) & 63) * 255 // 63, (p & 31) * 255 // 31)) for p in range(65536)]
+    return _LUT
+
+
+def png_bytes(w, h, rows):
+    """rows: iterable of h RGB byte strings of length w*3"""
+    def chunk(t, d):
+        return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xFFFFFFFF)
+    raw = b"".join(b"\x00" + r for r in rows)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b""))
+
+
+def frame_png(fr, zoom=1):
+    lut = _lut()
+    rows = []
+    for y in range(fr.h):
+        line = fr.px[y * fr.w : (y + 1) * fr.w]
+        if zoom == 1:
+            rows.append(b"".join(lut[p] for p in line))
+        else:
+            r = b"".join(lut[p] * zoom for p in line)
+            rows.extend([r] * zoom)
+    return png_bytes(fr.w * zoom, fr.h * zoom, rows)
+
+
+def write_atomic(path, data):
+    path = pathlib.Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, path)
+
+
+# ---------------- diff ----------------
+def dirty(a, b):
+    """(x0, y0, x1, y1) inclusive bounding box of changed pixels and the changed count, or (None, 0)."""
+    if (a.w, a.h) != (b.w, b.h):
+        return (0, 0, b.w - 1, b.h - 1), b.w * b.h
+    w = a.w
+    x0, y0, x1, y1, n = w, None, -1, -1, 0
+    for y in range(a.h):
+        ra, rb = a.px[y * w : (y + 1) * w], b.px[y * w : (y + 1) * w]
+        if ra == rb:
+            continue
+        if y0 is None:
+            y0 = y
+        y1 = y
+        for x in range(w):
+            if ra[x] != rb[x]:
+                n += 1
+                x0 = min(x0, x)
+                x1 = max(x1, x)
+    return ((x0, y0, x1, y1) if y0 is not None else None), n
+
+
+def diff_png(a, b):
+    lut = _lut()
+    box, n = dirty(a, b)
+    rows = []
+    same = (a.w, a.h) == (b.w, b.h)
+    for y in range(b.h):
+        out = bytearray()
+        for x in range(b.w):
+            p = b.px[y * b.w + x]
+            if same and a.px[y * b.w + x] != p:
+                out += b"\xff\x00\xff"
+            else:
+                r, g, bl = lut[p]
+                out += bytes((r // 3, g // 3, bl // 3))
+            if box and ((y in (box[1], box[3]) and box[0] <= x <= box[2]) or (x in (box[0], box[2]) and box[1] <= y <= box[3])):
+                out[-3:] = b"\x00\xff\xff"
+        rows.append(bytes(out))
+    return png_bytes(b.w, b.h, rows), box, n
+
+
+def describe(box, n):
+    if not box:
+        return "no change"
+    return f"changed {n} px, dirty rect x={box[0]} y={box[1]} w={box[2] - box[0] + 1} h={box[3] - box[1] + 1}"
+
+
+# ---------------- device ----------------
+def sh(cmd, wait=2):
+    return subprocess.run([str(TOOLS / "homtom-sh"), cmd, str(wait)], capture_output=True, text=True, timeout=40).stdout
+
+
+def ftp_get(path, timeout=10):
+    with urllib.request.urlopen(FTP + path, timeout=timeout) as r:
+        return r.read()
+
+
+def ensure_tool():
+    st = subprocess.run([str(TOOLS / "homtom-state")], capture_output=True, text=True).stdout
+    if "state=LINUX" not in st:
+        sys.exit(f"device not in LINUX state: {st.strip()}")
+    size = LOCAL_BIN.stat().st_size
+    got = sh(f"wc -c < {DEV_BIN} 2>/dev/null || echo 0", 2).split()
+    if str(size) not in got:
+        subprocess.run([str(TOOLS / "homtom-put"), str(LOCAL_BIN), DEV_BIN], check=True, capture_output=True, timeout=70)
+        sh(f"chmod +x {DEV_BIN}", 2)
+
+
+def shoot(scale=1):
+    sh(f"rm -f {DEV_SHOT}; {DEV_BIN} -s {scale} -o {DEV_SHOT} || echo SHOT-FAIL", 2)
+    for _ in range(5):
+        try:
+            data = ftp_get(DEV_SHOT)
+            decode_hts(data)
+            return data
+        except Exception:
+            time.sleep(0.5)
+    sys.exit("could not fetch the screenshot (see: tools/homtom-sh '/tmp/homtom-shot -i')")
+
+
+def report(fr):
+    for w in fr.warnings():
+        print("warning:", w, file=sys.stderr)
+
+
+# ---------------- live view ----------------
+PAGE = """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<title>homtom screen</title><style>
+:root{color-scheme:dark}body{margin:0;background:#111;color:#bbb;font:13px ui-monospace,monospace;padding:16px}
+#wrap{position:relative;display:inline-block;max-width:100%}img{display:block;image-rendering:pixelated;width:%ZW%px;max-width:100%;border:1px solid #333}
+#box{position:absolute;border:1px solid #0ff;pointer-events:none;display:none}#m{margin-top:8px;white-space:pre-wrap}
+</style></head><body><div id="wrap"><img id="i" src="/frame.png"><div id="box"></div></div><div id="m">waiting</div>
+<script>
+let seq=-1;const W=%W%;
+async function tick(){try{const m=await (await fetch('/meta.json?'+Date.now())).json();
+if(m.frame!==seq){seq=m.frame;document.getElementById('i').src='/frame.png?'+seq;
+const b=document.getElementById('box');const img=document.getElementById('i');const k=img.clientWidth/W;
+if(m.box){b.style.display='block';b.style.left=(m.box[0]*k)+'px';b.style.top=(m.box[1]*k)+'px';
+b.style.width=((m.box[2]-m.box[0]+1)*k)+'px';b.style.height=((m.box[3]-m.box[1]+1)*k)+'px'}else b.style.display='none'}
+document.getElementById('m').textContent=m.text}catch(e){document.getElementById('m').textContent='server gone'}}
+setInterval(tick,%MS%);tick();
+</script></body></html>"""
+
+
+class Live:
+    def __init__(self):
+        self.png, self.meta, self.lock = b"", {"frame": -1, "text": "waiting", "box": None}, threading.Lock()
+
+
+def serve(live, port, page):
+    class H(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            path = self.path.split("?")[0]
+            with live.lock:
+                body, ctype = {"/": (page, "text/html; charset=utf-8"), "/frame.png": (live.png, "image/png"),
+                               "/meta.json": (json.dumps(live.meta).encode(), "application/json")}.get(path, (None, None))
+            if body is None:
+                self.send_error(404)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    try:
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", port), H)
+    except OSError:
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        print(f"port {port} is in use; using {srv.server_address[1]}", file=sys.stderr)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+def watch(args, out):
+    interval = max(0.25, args.watch)
+    ms = int(interval * 1000)
+    dur = min(3600, args.for_s)
+    live = Live()
+    w = 480 // args.scale
+    page = (PAGE.replace("%W%", str(w)).replace("%MS%", str(min(ms, 1000))).replace("%ZW%", str(w * max(1, args.zoom)))).encode()
+    srv = serve(live, args.port, page)
+    res = sh(f"rm -f {DEV_LIVE}; {DEV_BIN} -s {args.scale} -o {DEV_LIVE} -l {ms} -t {dur + 5} >/dev/null 2>&1 </dev/null & echo LIVEPID=$!", 2)
+    pid = next((l.split("=", 1)[1].strip() for l in res.splitlines() if l.startswith("LIVEPID=")), None)
+    if not pid or not pid.isdigit():
+        srv.shutdown()
+        sys.exit("could not start the device loop: " + res.strip())
+    print(f"live view: http://127.0.0.1:{srv.server_address[1]}/   file: {out}   device loop pid {pid}, stops after {dur} s; Ctrl-C to end")
+    prev, raw_prev, t_end, frames = None, None, time.time() + dur, 0
+    try:
+        while time.time() < t_end:
+            t0 = time.time()
+            try:
+                raw = ftp_get(DEV_LIVE, timeout=5)
+            except Exception:
+                raw = None
+            if raw and len(raw) >= 24 and raw[24:] != raw_prev:
+                fr = decode_hts(raw)
+                box, n = dirty(prev, fr) if prev else ((0, 0, fr.w - 1, fr.h - 1), fr.w * fr.h)
+                png = frame_png(fr, args.zoom)
+                write_atomic(out, png)
+                frames += 1
+                text = f"frame {frames} (device seq {fr.seq}) {time.strftime('%H:%M:%S')}  {describe(box, n)}"
+                text += "".join("\nwarning: " + w for w in fr.warnings())
+                with live.lock:
+                    live.png, live.meta = png, {"frame": frames, "text": text, "box": box and list(box)}
+                print(text, flush=True)
+                prev, raw_prev = fr, raw[24:]
+            time.sleep(max(0.0, interval - (time.time() - t0)))
+    except KeyboardInterrupt:
+        pass
+    finally:
+        srv.shutdown()
+        sh(f"grep -q homtom-shot /proc/{pid}/cmdline 2>/dev/null && kill {pid}; rm -f {DEV_LIVE} {DEV_LIVE}.tmp", 2)
+        print("stopped; device loop killed")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("-o", "--out", help="output PNG (default .runtime/screen/shot.png, live.png for --watch, diff.png for --diff)")
+    ap.add_argument("-z", "--zoom", type=int, default=1, help="nearest-neighbour zoom of the PNG")
+    ap.add_argument("-s", "--scale", type=int, default=1, choices=(1, 2, 4), help="device-side box downscale")
+    ap.add_argument("--watch", type=float, metavar="SECONDS", help="refresh every SECONDS (min 0.25)")
+    ap.add_argument("--port", type=int, default=8731)
+    ap.add_argument("--for", dest="for_s", type=int, default=600, help="watch duration cap in seconds (max 3600)")
+    ap.add_argument("--diff", nargs="*", metavar="IMG", help="diff: none = previous shot, A = A vs new shot, A B = offline")
+    ap.add_argument("--info", action="store_true")
+    ap.add_argument("--convert", metavar="IN")
+    args = ap.parse_args()
+    zoom = max(1, args.zoom)
+
+    if args.convert:
+        out = args.out or str(pathlib.Path(args.convert).with_suffix(".png"))
+        fr = load(args.convert)
+        report(fr)
+        write_atomic(out, frame_png(fr, zoom))
+        print(f"{out} {fr.w * zoom}x{fr.h * zoom}")
+        return
+    if args.diff is not None and len(args.diff) == 2:
+        png, box, n = diff_png(load(args.diff[0]), load(args.diff[1]))
+        out = args.out or str(OUTDIR / "diff.png")
+        write_atomic(out, png)
+        print(f"{describe(box, n)}\n{out}")
+        return
+
+    ensure_tool()
+    if args.info:
+        print(sh(f"{DEV_BIN} -i", 2).strip())
+        return
+    if args.watch:
+        watch(args, pathlib.Path(args.out or OUTDIR / "live.png"))
+        return
+
+    out = pathlib.Path(args.out or OUTDIR / "shot.png")
+    hts, prev = out.with_suffix(".hts"), out.with_name(out.stem + ".prev.hts")
+    if hts.exists():
+        os.replace(hts, prev)
+    t0 = time.time()
+    data = shoot(args.scale)
+    fr = decode_hts(data)
+    report(fr)
+    write_atomic(hts, data)
+    write_atomic(out, frame_png(fr, zoom))
+    print(f"{out} {fr.w * zoom}x{fr.h * zoom} fb=0x{fr.phys:08x} {len(data)} bytes in {time.time() - t0:.1f}s")
+    if args.diff is not None:
+        base = load(args.diff[0]) if args.diff else (load(prev) if prev.exists() else None)
+        if base is None:
+            print("no previous shot to diff against")
+            return
+        png, box, n = diff_png(base, fr)
+        dpath = out.with_name(out.stem + ".diff.png")
+        write_atomic(dpath, png)
+        print(f"{describe(box, n)}\n{dpath}")
+
+if __name__ == "__main__":
+    main()

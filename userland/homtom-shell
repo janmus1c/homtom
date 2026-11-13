@@ -1,0 +1,8 @@
+#!/bin/busybox sh
+# Raw root shell for tools/homtom-sh on TCP 2323. A web page in a browser on the host can POST to this port, so a first
+# line that looks like an HTTP request is dropped instead of being executed.
+read -r l
+case "$l" in
+GET\ *|POST\ *|PUT\ *|HEAD\ *|OPTIONS\ *|DELETE\ *|PATCH\ *|CONNECT\ *|TRACE\ *) exit 0 ;;
+esac
+( echo "$l"; cat ) | /bin/sh 2>&1

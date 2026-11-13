@@ -1,0 +1,4 @@
+#!/bin/bash
+# Run commands on the device's root shell (raw TCP 2323 over the USB link). Usage: homtom-sh 'cmd; cmd' [seconds-to-wait]
+# Output is the device's stdout/stderr. Hard 30 s cap. Use homtom-state first to check the device is LINUX.
+{ printf '\n%s\nexit\n' "$1"; sleep "${2:-3}"; } | timeout 30 nc -w 8 192.168.1.10 2323 2>&1

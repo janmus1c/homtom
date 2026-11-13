@@ -1,0 +1,65 @@
+#!/bin/busybox sh
+# homtom-mic-test: the "Mic test" button of the Tools page (docs/SCREEN_TOOLS.md). A 20 s live level meter on the internal
+# microphone: homtom-snd2 --micmeter (codec input select 1, right channel, PGA gain 24: docs/LESSONS.md) prints one line
+# "m LEVEL PEAK LEFT" every 250 ms (whole dBFS with the DC offset removed, seconds left) and this script copies it to
+# /tmp/ui.extra about once a second:
+#   mic_level  dBFS RMS of the latest 250 ms window         mic_peak  highest sample peak seen, dBFS
+#   mic_t      seconds left                                 mic_state running, then ok, quiet or error
+# ok when the loudest RMS level seen is more than 12 dB above the quietest one (the room noise floor): sound that came
+# and went. quiet: the level never moved. error: no meter line arrived (codec busy or homtom-snd2 failed).
+# The first 0.5 s (codec switch-on pop) is shown but not counted. homtom-snd2 runs at normal priority, so the screen keeps
+# updating; the GUI runs this in its audio slot, so a beep cannot overlap it. Nothing is killed.
+PATH=/bin:/sbin:/usr/bin:/usr/sbin
+export PATH
+SECS=20
+k() { echo "homtom-mic-test: $*" > /dev/kmsg 2> /dev/null; }
+
+homtom-lock mictest $$ || exit 0
+trap 'rm -f /tmp/lock.mictest' EXIT
+if pidof homtom-snd2 > /dev/null; then
+	homtom-ui-extra mic_state=error mic_level= mic_peak= mic_t=
+	k "codec busy (homtom-snd2 already running)"
+	exit 1
+fi
+homtom-ui-extra mic_state=running mic_level= mic_peak= mic_t=$SECS
+k "start ${SECS}s"
+homtom-snd2 --micmeter $SECS --micsel 1 --gain 24 2> /dev/null | {
+	n=0
+	lo=0
+	hi=0
+	pk=
+	lv=
+	t=$SECS
+	while read tag l p r; do
+		[ "$tag" = m ] || continue
+		case "$l$p$r" in '' | *[!0-9-]*) continue ;; esac
+		n=$((n + 1))
+		lv=$l
+		t=$r
+		if [ $n -le 2 ]; then
+			pk=$p
+		elif [ $n -eq 3 ]; then
+			lo=$l
+			hi=$l
+			pk=$p
+		else
+			[ "$l" -lt $lo ] && lo=$l
+			[ "$l" -gt $hi ] && hi=$l
+			[ "$p" -gt $pk ] && pk=$p
+		fi
+		if [ $((n % 4)) -eq 1 ]; then
+			homtom-ui-extra mic_level=$lv mic_peak=$pk mic_t=$t
+			[ $((n % 20)) -eq 1 ] && k "level=$lv peak=$pk left=${t}s floor=$lo"
+		fi
+	done
+	if [ $n -lt 4 ]; then
+		homtom-ui-extra mic_state=error mic_level= mic_peak= mic_t=
+		k "error: $n meter lines"
+		exit 1
+	fi
+	st=quiet
+	[ $((hi - lo)) -gt 12 ] && st=ok
+	homtom-ui-extra mic_level=$lv mic_peak=$pk mic_t=0 mic_state=$st
+	k "done lines=$n floor=$lo loudest=$hi peak=$pk state=$st"
+}
+exit 0

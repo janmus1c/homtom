@@ -1,0 +1,5 @@
+page: power
+spawn[reboot]: /bin/homtom-poweroff
+event: seq=1 up=93784 event=cmd name=power-off value=0 page=power
+spawn[reboot]: /bin/reboot
+event: seq=2 up=93784 event=cmd name=restart value=0 page=power

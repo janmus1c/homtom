@@ -1,0 +1,3 @@
+event: seq=1 up=93784 event=ha name=office_amb value=toggle page=office
+event: seq=2 up=93784 event=ha name=office_hue2 value=toggle page=office
+event: seq=3 up=93784 event=ha name=vent_onoff value=press page=office

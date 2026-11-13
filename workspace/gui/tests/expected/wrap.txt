@@ -1,0 +1,4 @@
+event: seq=1 up=93784 event=key name=short value=1 page=c
+event: seq=2 up=93784 event=key name=short value=1 page=a
+event: seq=3 up=93784 event=key name=short value=1 page=b
+event: seq=4 up=93784 event=key name=short value=1 page=a

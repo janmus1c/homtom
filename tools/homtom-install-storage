@@ -1,0 +1,47 @@
+#!/bin/sh
+# Wait for the GO 630 in bootloader USB storage mode, install build/ttsystem, verify and eject.
+set -eu
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+IMAGE=${1:-$ROOT/build/ttsystem}
+SHA=$(shasum -a 256 "$IMAGE" | cut -d' ' -f1)
+until [ -d /Volumes/INTERNAL ]; do sleep 2; done
+sleep 3
+LOGS=$ROOT/artifacts/device-logs-$(date -u +%Y%m%dT%H%M%SZ)
+mkdir -p "$LOGS" && cp -p /Volumes/INTERNAL/homtom/logs/* "$LOGS/" 2>/dev/null; cp -p /Volumes/INTERNAL/opentom/logs/* "$LOGS/" 2>/dev/null; echo "LOGS COPIED $LOGS"
+DISK=$(diskutil info -plist /Volumes/INTERNAL | plutil -extract ParentWholeDisk raw -)
+[ "$(diskutil info -plist "$DISK" | plutil -extract MediaName raw -)" = GO ] || { echo "INTERNAL is not a GO volume"; exit 1; }
+[ -f /Volumes/INTERNAL/ttsystem.opentom ] || cp /Volumes/INTERNAL/ttsystem /Volumes/INTERNAL/ttsystem.opentom
+cp "$IMAGE" /Volumes/INTERNAL/ttsystem.new && sync
+[ "$(shasum -a 256 /Volumes/INTERNAL/ttsystem.new | cut -d' ' -f1)" = "$SHA" ] || { echo "copy verification failed"; exit 1; }
+mv /Volumes/INTERNAL/ttsystem.new /Volumes/INTERNAL/ttsystem && sync
+echo "INSTALLED $SHA"
+if [ -d /Volumes/INTERNAL/homtom/dump ]; then
+	D=$ROOT/artifacts/bootloader-dump-$(date -u +%Y%m%dT%H%M%SZ)
+	cp -R /Volumes/INTERNAL/homtom/dump "$D" && (cd "$D" && shasum -a 256 * > SHA256SUMS) && echo "DUMP COPIED $D"
+fi
+SPLASH=$ROOT/build/bootsplash
+ORIG=$ROOT/artifacts/backups/bootsplash-original
+if [ -d "$SPLASH" ]; then
+	mkdir -p "$ORIG"
+	for BMP in splashw.bmp lowbatteryw.bmp antitheftw.bmp; do
+		[ -f "$ORIG/$BMP" ] || [ ! -f "/Volumes/INTERNAL/$BMP" ] || cp "/Volumes/INTERNAL/$BMP" "$ORIG/$BMP"
+		cp "$SPLASH/$BMP" "/Volumes/INTERNAL/$BMP"
+	done
+	sync
+	echo "BOOT SCREENS INSTALLED"
+fi
+START=/Volumes/INTERNAL/opentom/start.sh
+if [ -f "$START" ] && grep -q '^power_button -b bin/suspend' "$START"; then
+	[ -f "$START.before-nosuspend" ] || cp "$START" "$START.before-nosuspend"
+	sed -i '' 's|^power_button -b bin/suspend bin/suspend &|# homtom: suspend disabled to keep USB up|' "$START"
+	echo "SUSPEND DISABLED"
+fi
+if [ -f "$START" ] && grep -q '^if \[ -f "\$DIST/bin/lab-connectivity" \]' "$START"; then
+	[ -f "$START.before-nolab" ] || cp "$START" "$START.before-nolab"
+	sed -i '' 's|^if \[ -f "\$DIST/bin/lab-connectivity" \]; then|if false; then # homtom: lab helper retired|' "$START"
+	echo "LAB HELPER DISABLED"
+fi
+sync
+diskutil eject "$DISK"
+for VOL in "/Volumes/NO NAME"; do [ -d "$VOL" ] && diskutil eject "$VOL" || true; done
+echo READY_TO_BOOT

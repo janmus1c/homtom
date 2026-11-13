@@ -1,0 +1,28 @@
+#!/bin/busybox sh
+# One JSON document with the device state; served on TCP 8080 by tcpsvd (HA-style status endpoint).
+# consume the request headers so the client does not see a reset
+while read l; do [ ${#l} -le 1 ] && break; done
+read up rest < /proc/uptime
+set -- $(homtom-hw battery)
+gpg=$(devmem 0x56000064 | cut -d" " -f2); gpf=$(devmem 0x56000054 | cut -d" " -f2)
+charging=$(( (0x$gpg >> 1 & 1) ^ 1 )); ext_power=$(( (0x$gpf >> 2 & 1) ^ 1 )); key=$(( (0x$gpf & 1) ^ 1 ))
+# Battery estimate: AIN4 reads a ~1.225 V reference, so mv = bat/ref * 1225 * 2 (assumes a 1:2 divider on AIN0: unverified); pct is linear 3300..4200 mV.
+mv=null; pct=null
+if [ "${2:-0}" -gt 0 ]; then
+	mv=$(( ${1:-0} * 2450 / $2 )); pct=$(( (mv - 3300) * 100 / 900 ))
+	[ $pct -lt 0 ] && pct=0; [ $pct -gt 100 ] && pct=100
+fi
+# Light sensor needs LX_EN (GPJ1) as an output driven high.
+devmem 0x560000D0 0x4 0xC > /dev/null; devmem 0x560000D4 0x2 0x2 > /dev/null
+light=$(homtom-hw adc 2)
+gts=$(cat /tmp/gps_ts 2>/dev/null); gage=null; if [ -n "$gts" ]; then gage=$(( ${up%.*} - gts )); [ $gage -lt 0 ] && gage=0; fi
+gga=$(cat /tmp/gga 2>/dev/null); rmc=$(cat /tmp/rmc 2>/dev/null)
+# NMEA lines end in CR: drop it so the JSON stays valid
+[ -n "$gga" ] && gga=${gga%?}
+[ -n "$rmc" ] && rmc=${rmc%?}
+body="{\"uptime_s\":${up%.*},\"battery_raw\":${1:-0},\"battery_ref_raw\":${2:-0},\"charging\":$charging,\"external_power\":$ext_power,\"power_key\":$key,\"battery_mv_est\":$mv,\"battery_pct_est\":$pct,\"light_raw\":${light:-null},\"gps_age_s\":$gage,\"gga\":\"$gga\",\"rmc\":\"$rmc\"}"
+echo "HTTP/1.0 200 OK"
+echo "Content-Type: application/json"
+echo "Connection: close"
+echo
+echo "$body"

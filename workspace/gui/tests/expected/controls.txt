@@ -1,0 +1,9 @@
+event: seq=1 up=93784 event=set name=backlight value=15 page=controls
+spawn[backlight]: /bin/homtom-bl 38
+spawn[audio]: /bin/homtom-snd2 --hz 1000 --secs 1 --vol 89
+event: seq=2 up=93784 event=beep name=beep value=60 page=controls
+event: seq=3 up=93784 event=set name=mute value=1 page=controls
+event: seq=4 up=93784 event=key name=short value=1 page=controls
+event: seq=5 up=93784 event=key name=long value=1 page=scenes
+event: seq=6 up=93784 event=set name=backlight value=10 page=scenes
+spawn[backlight]: /bin/homtom-bl 25

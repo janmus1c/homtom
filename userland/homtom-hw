@@ -1,0 +1,40 @@
+#!/bin/busybox sh
+# Hardware helpers for the GO 630 (S3C2443). Needs /bin/devmem. Pin facts: docs/HARDWARE_MAP.md
+# usage: homtom-hw adc CH | battery | gps-on | gps-off | uartpins
+rd() { devmem "$1" | cut -d" " -f2; }
+
+adc() {	# raw 10-bit sample of ADC mux channel $1 (0 battery, 2 light, 4 ref, 5 touch X, 6 charge, 9 touch Y)
+	devmem 0x58000018 "$1" > /dev/null
+	devmem 0x58000000 $(( (1<<14) | (49<<6) | 1 )) > /dev/null
+	i=0
+	while [ $i -lt 50 ]; do
+		v=$(rd 0x58000000)
+		[ $(( 0x$v & 0x8000 )) -ne 0 ] && break
+		i=$((i+1))
+	done
+	echo $(( 0x$(rd 0x5800000c) & 0x3ff ))
+}
+
+case "$1" in
+adc) adc "$2" ;;
+battery)	# raw battery and reference samples; AIN4 reference is powered only around the read (GPL14)
+	devmem 0x560000F4 0x4000 0x4000 > /dev/null
+	sleep 1
+	bat=$(adc 0); ref=$(adc 4)
+	devmem 0x560000F4 0 0x4000 > /dev/null
+	echo "$bat $ref"
+	;;
+uartpins)	# GPH2/3 TXD1/RXD1, GPH10/11 CTS1/RTS1 (bluetooth), GPH4/5 TXD2/RXD2 (gps) = function 2
+	devmem 0x56000070 0x00A00AA0 0x00F00FF0 > /dev/null
+	;;
+gps-on)	# GPJ6 power high, GPJ7 reset released, GPJ8 reflash low (read-modify-write keeps PWR_RST/movinand bits)
+	homtom-hw uartpins
+	devmem 0x560000D4 0 0x100 > /dev/null
+	devmem 0x560000D4 0 0x80 > /dev/null; sleep 1
+	devmem 0x560000D4 0x80 0x80 > /dev/null
+	devmem 0x560000D4 0x40 0x40 > /dev/null
+	stty -F /dev/ttySAC2 4800 raw -echo -crtscts
+	;;
+gps-off) devmem 0x560000D4 0 0x40 > /dev/null ;;
+*) echo "usage: homtom-hw adc CH|battery|uartpins|gps-on|gps-off"; exit 2 ;;
+esac

@@ -1,0 +1,47 @@
+#!/bin/bash
+# Timeline of the homtom USB link for stability tests: one line per state change, plus a heartbeat
+# every minute. Pings every INTERVAL seconds; probes Telnet and FTP ports every PORT_EVERY seconds,
+# since each probe starts a login on the device. Read-only.
+# Usage: tools/homtom-linklog [logfile]   (default .runtime/link/linklog-<time>.log)
+INTERVAL=${INTERVAL:-2}
+PORT_EVERY=${PORT_EVERY:-30}
+MAC=02:54:54:00:06:31
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+LOG=${1:-$ROOT/.runtime/link/linklog-$(date +%Y%m%dT%H%M%S).log}
+mkdir -p "$(dirname "$LOG")"
+echo "logging to $LOG" >&2
+
+last=""; last_beat=0; last_ports=0; tel=-; ftp=-; up_since=$(date +%s)
+while true; do
+	now=$(date +%s)
+	usb=0
+	ioreg -p IOUSB -w0 | grep -q -e 'Ethernet Gadget' -e 'GO@' && usb=1
+	iface=none; ifstatus=absent
+	for i in $(ifconfig -l); do
+		if ifconfig "$i" 2>/dev/null | grep -q "$MAC"; then
+			iface=$i
+			ifstatus=$(ifconfig "$i" | awk '/status:/{print $2}')
+		fi
+	done
+	ping=0; rtt=-
+	if [ "$iface" != none ]; then
+		out=$(ping -c1 -t1 -b "$iface" 192.168.1.10 2>/dev/null) && {
+			ping=1; rtt=$(sed -n 's/.*time=\([0-9.]*\).*/\1/p' <<<"$out"); }
+		if [ $ping = 1 ] && [ $((now - last_ports)) -ge "$PORT_EVERY" ]; then
+			last_ports=$now
+			tel=0; ftp=0
+			nc -z -G 2 -b "$iface" 192.168.1.10 23 >/dev/null 2>&1 && tel=1
+			nc -z -G 2 -b "$iface" 192.168.1.10 21 >/dev/null 2>&1 && ftp=1
+		fi
+	fi
+	[ $ping = 0 ] && { tel=-; ftp=-; }
+	state="usb=$usb if=$iface/$ifstatus ping=$ping telnet=$tel ftp=$ftp"
+	if [ "$state" != "$last" ]; then
+		echo "$(date '+%F %T') $state (previous lasted $((now - up_since))s)" >>"$LOG"
+		last=$state; up_since=$now
+	elif [ $((now - last_beat)) -ge 60 ]; then
+		echo "$(date '+%F %T') . $state rtt=${rtt}ms" >>"$LOG"
+	fi
+	[ $((now - last_beat)) -ge 60 ] && last_beat=$now
+	sleep "$INTERVAL"
+done

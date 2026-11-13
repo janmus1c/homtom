@@ -1,0 +1,255 @@
+#!/usr/bin/env -S python3 -I
+"""Tiny end-to-end scenario runner for the device touch UI: inject input, take screenshots, compare with host renders.
+
+usage: homtom-e2e [--fake] [--keep] [-o DIR] SCENARIO [SCENARIO ...]
+       homtom-e2e --list-commands
+
+  --fake   no device: the screen is the host renderer (workspace/gui/out/preview) with every injected input replayed.
+           This checks the scenario file, the runner and the host/UI logic, not the device.
+  -o DIR   artefact directory (default .runtime/e2e/<scenario name>/)
+
+Scenario files are plain text, one command per line, '#' starts a comment. Paths are relative to the repo root.
+
+  config PATH                 ui.conf used for the host reference renders (default workspace/gui/conf/default.conf)
+  data PATH                   status key=value file for the host renders (default workspace/gui/sample.txt)
+  ha PATH                     Home Assistant states file for the host renders (preview -e PATH -A 0); none by default
+  settle SEC                  pause after each input before the next step (default 1)
+  ignore X Y W H              mask a rectangle in every comparison (clock, live sensor values); repeatable
+  tap X Y [HOLDMS]            input, same semantics as tools/homtom-tap
+  swipe X0 Y0 X1 Y1 [MS]
+  slider XL XR Y PCT [PCT ...]
+  key short|long|hold5|hold10
+  wait SEC
+  shot NAME                   screenshot -> NAME.png/.hts in the artefact directory
+  expect-match PAGE [MAXPCT]  last shot against the host render of page PAGE (id or number), at most MAXPCT % pixels differ (default 1)
+  expect-region PAGE X Y W H [MAXPCT]   the same, limited to a rectangle (alias: expect-text)
+  expect-replay [MAXPCT]      last shot against a host render that replays every input injected so far (sliders, toggles)
+  expect-changed [MINPCT]     last shot differs from the one before by at least MINPCT % (default 0.01)
+  expect-same [MAXPCT]        last shot differs from the one before by at most MAXPCT % (default 0)
+  expect-pixel X Y RRGGBB [TOL]   pixel of the last shot, per-channel tolerance TOL (default 8)
+
+Exit status: 0 all pass, 1 a check failed, 2 bad scenario, 3 no /tmp/ui.in on the device (old launcher), 4 GUI not reading it, 5 device error.
+"""
+import importlib.machinery, importlib.util, os, pathlib, subprocess, sys, time
+
+sys.dont_write_bytecode = True
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+GUI = ROOT / "workspace" / "gui"
+PREVIEW = GUI / "out" / "preview"
+
+
+def load_tool(name):
+    p = ROOT / "tools" / name
+    spec = importlib.util.spec_from_loader(name, importlib.machinery.SourceFileLoader(name, str(p)))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+class Bad(Exception):
+    pass
+
+
+class Runner:
+    def __init__(self, path, fake, outdir):
+        self.scr, self.tap = load_tool("homtom-screen"), load_tool("homtom-tap")
+        self.path, self.fake = pathlib.Path(path), fake
+        self.out = pathlib.Path(outdir or ROOT / ".runtime" / "e2e" / self.path.stem)
+        self.out.mkdir(parents=True, exist_ok=True)
+        self.config, self.data, self.ha = GUI / "conf" / "default.conf", GUI / "sample.txt", None
+        self.settle, self.masks, self.sent = 1.0, [], []
+        self.last = self.prev = None
+        self.passed = self.failed = 0
+        self.ready = False
+
+    # ---- host rendering
+    def render(self, name, page=None, replay=False):
+        if not PREVIEW.exists():
+            raise Bad(f"{PREVIEW} is missing: run workspace/gui/build.sh preview")
+        png = self.out / f"{name}.png"
+        cmd = [str(PREVIEW), "-c", str(self.config), "-f", str(self.data)]
+        if self.ha:
+            cmd += ["-e", str(self.ha), "-A", "0"]
+        if page is not None:
+            cmd += ["-p", page]
+        if replay:
+            for l in self.sent:
+                w = l.split()
+                cmd += (["-t", f"{w[1]},{w[2]}"] if w[0] == "t" else ["-u"] if w[0] == "up" else
+                        ["-w", w[1]] if w[0] == "w" else ["-K", w[1]])
+        r = subprocess.run(cmd + ["-o", str(png)], capture_output=True, text=True, timeout=30)
+        if r.returncode == 2:
+            raise Bad(f"{self.config} does not parse: {r.stderr.strip()}")
+        if r.returncode:
+            raise Bad(f"preview failed: {r.stderr.strip()}")
+        return self.scr.load(png), png
+
+    # ---- comparison
+    def pct(self, a, b, region=None):
+        if (a.w, a.h) != (b.w, b.h):
+            return 100.0, f"size {a.w}x{a.h} vs {b.w}x{b.h}"
+        x0, y0, w, h = region or (0, 0, a.w, a.h)
+        n = tot = 0
+        for y in range(max(0, y0), min(a.h, y0 + h)):
+            for x in range(max(0, x0), min(a.w, x0 + w)):
+                if any(mx <= x < mx + mw and my <= y < my + mh for mx, my, mw, mh in self.masks):
+                    continue
+                tot += 1
+                n += a.px[y * a.w + x] != b.px[y * a.w + x]
+        return (100.0 * n / tot if tot else 0.0), f"{n}/{tot} px"
+
+    def verdict(self, label, ok, detail):
+        self.passed += ok
+        self.failed += not ok
+        print(f"  {'PASS' if ok else 'FAIL'}  {label}: {detail}")
+        return ok
+
+    def need_shot(self):
+        if self.last is None:
+            raise Bad("expect before any shot")
+
+    def compare(self, label, ref, png, limit, region=None):
+        self.need_shot()
+        p, d = self.pct(self.last, ref, region)
+        ok = p <= limit
+        extra = ""
+        if not ok:
+            dp = self.out / f"{label.split()[0].replace('/', '_')}.diff.png"
+            self.scr.write_atomic(dp, self.scr.diff_png(ref, self.last)[0])
+            extra = f"  (ref {png.name}, diff {dp})"
+        self.verdict(label, ok, f"{p:.2f}% differ ({d}), limit {limit}%{extra}")
+
+    # ---- steps
+    def inject(self, plan):
+        for k, v in plan:
+            if k == "line":
+                self.sent.append(v)
+            elif k == "sleep":
+                self.sent.append(f"w {int(v * 1000)}")  # replayed as preview -w: a held tap becomes a long press
+        if not self.fake:
+            self.tap.send(plan)
+        time.sleep(0 if self.fake else self.settle)
+
+    def shot(self, name):
+        if self.fake:
+            fr, _ = self.render(f"{name}.fakeref", replay=True)
+        else:
+            if not self.ready:
+                self.scr.ensure_tool()
+                self.ready = True
+            try:
+                data = self.scr.shoot(1)
+            except SystemExit as e:
+                raise self.tap.TapError(f"screenshot failed: {e}", 5)
+            self.scr.write_atomic(self.out / f"{name}.hts", data)
+            fr = self.scr.decode_hts(data)
+        self.scr.write_atomic(self.out / f"{name}.png", self.scr.frame_png(fr))
+        self.prev, self.last = self.last, fr
+        print(f"  shot  {name} -> {self.out / (name + '.png')}")
+
+    def step(self, ln, w):
+        c, a = w[0], w[1:]
+        ints = lambda l: [int(v) for v in l]
+        try:
+            if c == "config":
+                self.config = ROOT / a[0]
+            elif c == "data":
+                self.data = ROOT / a[0]
+            elif c == "ha":
+                self.ha = ROOT / a[0]
+            elif c == "settle":
+                self.settle = float(a[0])
+            elif c == "ignore":
+                self.masks.append(tuple(ints(a[:4])))
+            elif c == "wait":
+                time.sleep(0 if self.fake else float(a[0]))
+            elif c == "tap":
+                self.inject(self.tap.plan_tap(*ints(a[:2]), int(a[2]) if len(a) > 2 else 0))
+            elif c == "swipe":
+                self.inject(self.tap.plan_swipe(*ints(a[:4]), int(a[4]) if len(a) > 4 else 0))
+            elif c == "slider":
+                self.inject(self.tap.plan_slider(*ints(a[:3]), ints(a[3:])))
+            elif c == "key":
+                self.inject(self.tap.plan_key(a[0]))
+            elif c == "shot":
+                self.shot(a[0])
+            elif c == "expect-match":
+                ref, png = self.render(f"ref-{a[0]}", page=a[0])
+                self.compare(f"match {a[0]}", ref, png, float(a[1]) if len(a) > 1 else 1.0)
+            elif c in ("expect-region", "expect-text"):
+                ref, png = self.render(f"ref-{a[0]}", page=a[0])
+                self.compare(f"region {a[0]} {','.join(a[1:5])}", ref, png, float(a[5]) if len(a) > 5 else 1.0, tuple(ints(a[1:5])))
+            elif c == "expect-replay":
+                ref, png = self.render("ref-replay", replay=True)
+                self.compare("replay", ref, png, float(a[0]) if a else 1.0)
+            elif c in ("expect-changed", "expect-same"):
+                if self.prev is None:
+                    raise Bad("needs two shots")
+                p, d = self.pct(self.prev, self.last)
+                if c == "expect-changed":
+                    lim = float(a[0]) if a else 0.01
+                    self.verdict("changed", p >= lim, f"{p:.2f}% differ ({d}), need at least {lim}%")
+                else:
+                    lim = float(a[0]) if a else 0.0
+                    self.verdict("same", p <= lim, f"{p:.2f}% differ ({d}), limit {lim}%")
+            elif c == "expect-pixel":
+                self.need_shot()
+                x, y, tol = int(a[0]), int(a[1]), int(a[3]) if len(a) > 3 else 8
+                want = bytes.fromhex(a[2])
+                got = self.scr._lut()[self.last.px[y * self.last.w + x]]
+                ok = all(abs(g - t) <= tol for g, t in zip(got, want))
+                self.verdict(f"pixel {x},{y}", ok, f"got {got.hex()} want {a[2].lower()} tol {tol}")
+            else:
+                raise Bad(f"unknown command '{c}'")
+        except (IndexError, ValueError) as e:
+            raise Bad(f"bad arguments ({e})")
+
+    def run(self):
+        print(f"{self.path.name}{' [fake: host renderer]' if self.fake else ''}")
+        for n, raw in enumerate(self.path.read_text().splitlines(), 1):
+            w = raw.split("#", 1)[0].split()
+            if not w:
+                continue
+            try:
+                self.step(n, w)
+            except Bad as e:
+                raise Bad(f"{self.path.name}:{n}: {e}")
+        print(f"  {self.passed} passed, {self.failed} failed")
+        return 1 if self.failed else 0
+
+
+def main():
+    args = sys.argv[1:]
+    if not args or args[0] in ("-h", "--help", "--list-commands"):
+        print(__doc__)
+        return 0 if args else 2
+    fake, outdir, files = False, None, []
+    i = 0
+    while i < len(args):
+        if args[i] == "--fake":
+            fake = True
+        elif args[i] == "-o" and i + 1 < len(args):
+            i += 1
+            outdir = args[i]
+        else:
+            files.append(args[i])
+        i += 1
+    rc = 0
+    for f in files:
+        try:
+            r = Runner(f, fake, outdir)
+            rc = max(rc, r.run())
+        except Bad as e:
+            print(f"homtom-e2e: {e}", file=sys.stderr)
+            rc = max(rc, 2)
+        except Exception as e:
+            code = getattr(e, "code", None)
+            if code is None:
+                raise
+            print(f"homtom-e2e: {e}", file=sys.stderr)
+            rc = max(rc, code)
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())

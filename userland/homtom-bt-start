@@ -1,0 +1,58 @@
+#!/bin/busybox sh
+# Boot-time Bluetooth bring-up, gated by /mnt/internal/homtom/bt.enable. bt.trying is a crash-loop breaker: it exists while
+# the bring-up runs and holds one "x" line per attempt: a hang or reset during it is retried once, and after two failed
+# attempts the next boot skips Bluetooth (remove the file in storage mode to retry).
+D=/mnt/internal/homtom
+k() { echo "homtom-bt: $*" > /dev/kmsg 2>/dev/null; }
+[ -f /mnt/internal/ttsystem.lab2613 ] || { k "skipped, /mnt/internal is not INTERNAL"; exit 0; }
+[ -f $D/bt.enable ] || exit 0
+homtom-lock bt $$ || { k "already running"; exit 0; }
+if [ -f $D/bt.trying ] && [ "$(wc -c < $D/bt.trying)" -ge 4 ]; then k "skipped, two failed bring-ups (bt.trying)"; exit 0; fi
+echo x >> $D/bt.trying; sync
+cd /lib/modules
+for m in libaes aes_generic cmac ecc ecdh_generic bluetooth serdev hci_uart rfcomm; do insmod $m.ko 2>/dev/null; done
+
+# Full chip bring-up (also used for restarts). The blank persistent store leaves ANA_FREQ unset (BCCMD read returns ERROR):
+# set 16 MHz in RAM, warm reset, redo the handshake (docs/LESSONS.md).
+btup() {
+	killall hciattach 2>/dev/null
+	homtom-bt-up > /dev/null 2>&1
+	hciattach /dev/ttySAC1 1 > /dev/null 2>&1 < /dev/null &
+	sleep 3
+	hcictl up > /dev/null 2>&1
+	hcictl cmd 00 fc 13 c2 02 00 09 00 02 00 03 70 00 00 fe 01 01 00 08 00 80 3e > /dev/null 2>&1
+	hcictl cmd 00 fc 13 c2 02 00 09 00 04 00 02 40 00 00 00 00 00 00 00 00 00 00 > /dev/null 2>&1
+	killall hciattach 2>/dev/null
+	sleep 3
+	homtom-bt-handshake > /dev/null 2>&1
+	hciattach /dev/ttySAC1 1 > /dev/null 2>&1 < /dev/null &
+	sleep 3
+	hcictl up > /dev/null 2>&1
+	homtom-bt-discoverable > /tmp/bt-start.out 2>&1
+	hcictl cmd 24 0c 03 0c 01 00 > /dev/null 2>&1	# class of device: Computer / handheld PC (the default shows as a speaker)
+}
+chip_ok() { hcictl cmd 09 10 00 > /tmp/bt-health.out 2>&1 < /dev/null; grep -q "04 0e" /tmp/bt-health.out; }
+
+btup
+k "up, discoverable, ANA_FREQ 16000"
+( while :; do homtom-btd >> /tmp/btd.log 2>&1 < /dev/null; sleep 5; done ) &
+sleep 20
+if chip_ok; then rm -f $D/bt.trying; sync; else k "chip silent after bring-up, bt.trying kept"; fi
+open=0
+while :; do
+	if ! chip_ok; then
+		k "chip silent, restarting"
+		btup
+	fi
+	# homtom-btd closes the pairing window (/tmp/bt.pair) when its time is up (300 s, or the seconds written in the
+	# file, at most 1800); this is only a backstop for a btd that does not (an older binary, or btd not running)
+	if [ -f /tmp/bt.pair ]; then
+		open=$((open + 1))
+		if [ $open -ge 32 ]; then rm -f /tmp/bt.pair; k "pairing window closed by the backstop"; open=0; fi
+	else
+		open=0
+	fi
+	# RAM is small: cap the daemon log
+	[ "$(wc -c < /tmp/btd.log 2>/dev/null || echo 0)" -gt 100000 ] && : > /tmp/btd.log
+	sleep 60
+done

@@ -1,0 +1,7 @@
+spawn[gps]: /bin/homtom-hw gps-on
+event: seq=1 up=93784 event=cmd name=gps-on value=0 page=tools
+spawn[gps]: /bin/homtom-hw gps-off
+event: seq=2 up=93784 event=cmd name=gps-off value=0 page=tools
+spawn[cmd]: /tmp/homtom-shot -o /tmp/homtom-shot.hts
+event: seq=3 up=93784 event=cmd name=screenshot value=0 page=tools
+event: seq=4 up=93784 event=press name=ping value=1 page=tools

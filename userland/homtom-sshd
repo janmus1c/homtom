@@ -1,0 +1,87 @@
+#!/bin/busybox sh
+# Key-only SSH for the USB link: dropbear on 192.168.1.10:22, bound to the gadget interface $1 (default usb0).
+# Runs only while INTERNAL holds homtom/authorized_keys with at least one ssh-ed25519 public key; root logs in with a key,
+# never a password. The host key is made on the first start and kept on INTERNAL in homtom/ssh/ (docs/SSH.md).
+# Restarts dropbear when it exits; a missing or unusable authorized_keys at a (re)start stops the service until reboot.
+IF=${1:-usb0}
+ADDR=192.168.1.10
+D=/mnt/internal/homtom
+E=/etc/dropbear
+H=$E/dropbear_ed25519_host_key
+A=/root/.ssh/authorized_keys
+LOG=/tmp/sshd.log
+k() { echo "homtom-sshd: $*" > /dev/kmsg 2> /dev/null; echo "$*" >> $LOG; }
+umask 077
+[ -f /mnt/internal/ttsystem.lab2613 ] || { k "skipped, /mnt/internal is not INTERNAL"; exit 0; }
+type dropbear > /dev/null 2>&1 && type dropbearkey > /dev/null 2>&1 || { k "skipped, no dropbear in PATH"; exit 0; }
+homtom-lock sshd $$ || { k "already running"; exit 0; }
+
+# The initramfs has no account database. dropbear needs root with a shell listed in /etc/shells. The password field is
+# "x" with no /etc/shadow, so no password can match, and password logins are not compiled in anyway.
+grep -q '^root:' /etc/passwd 2> /dev/null || echo 'root:x:0:0:root:/root:/bin/sh' >> /etc/passwd
+grep -qx /bin/sh /etc/shells 2> /dev/null || echo /bin/sh >> /etc/shells
+chmod 644 /etc/passwd /etc/shells
+mkdir -p /root/.ssh $E /var/run
+chmod 700 /root /root/.ssh $E
+
+# Copy the user's public keys into RAM: only plain "ssh-ed25519 <key>" lines (comments, CR line ends and other key
+# types dropped; lines with options are skipped). dropbear refuses a key file that group or others can write, and FAT has
+# no modes, so it never reads INTERNAL directly.
+keys() {
+	local src=$D/authorized_keys n
+	[ -f $src ] || { k "no $src, not starting"; return 1; }
+	if grep -q 'PRIVATE KEY' $src; then
+		k "$src holds a private key, not starting: put only the .pub line there and delete the private key from INTERNAL"
+		return 1
+	fi
+	sed -n 's|^\(ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI[A-Za-z0-9+/]*=*\).*|\1|p' $src > $A.new
+	n=$(grep -c . $A.new)
+	[ "$n" -gt 0 ] || { rm -f $A.new; k "no ssh-ed25519 key in $src, not starting"; return 1; }
+	chmod 600 $A.new
+	mv $A.new $A
+	k "$n authorized key(s)"
+}
+
+# The host key lives in RAM while running; INTERNAL keeps the copy that survives a reboot plus the public half and the
+# fingerprint, so the user can pin it from storage mode before the first login.
+hostkey() {
+	local p=$D/ssh/ed25519_host_key
+	if [ ! -s $H ] && [ -s $p ]; then
+		cp $p $H.new && chmod 600 $H.new
+		if dropbearkey -y -f $H.new > /dev/null 2>&1; then
+			mv $H.new $H
+		else
+			rm -f $H.new
+			mv $p $p.bad
+			k "$p is not a usable host key; moved to $p.bad, making a new one (clients will see a changed key)"
+		fi
+	fi
+	if [ ! -s $H ]; then
+		rm -f $H.new
+		dropbearkey -t ed25519 -f $H.new > /dev/null 2>&1 || { rm -f $H.new; k "host key generation failed"; return 1; }
+		rm -f $H.new.pub
+		mv $H.new $H
+		mkdir -p $D/ssh
+		cp $H $p.new && mv $p.new $p && sync || k "could not save the host key on INTERNAL; a new one will be made next boot"
+	fi
+	if [ ! -s $D/ssh/fingerprint ] || [ ! -s $D/ssh/ed25519_host_key.pub ]; then
+		dropbearkey -y -f $H > $E/pub.out 2>&1
+		sed -n 's|^\(ssh-ed25519 [A-Za-z0-9+/]*=*\).*|\1|p' $E/pub.out > $D/ssh/ed25519_host_key.pub
+		sed -n 's/^Fingerprint: //p' $E/pub.out > $D/ssh/fingerprint
+		rm -f $E/pub.out
+		sync
+		k "host key $(cat $D/ssh/fingerprint)"
+	fi
+	return 0
+}
+
+while :; do
+	keys || exit 0
+	hostkey || { sleep 30; continue; }
+	k "listening on $ADDR:22 ($IF)"
+	# -s -g: no password logins (also compiled out), -j -k: no forwarding, -T 3: three auth attempts, -K 30: keepalive
+	dropbear -F -E -s -g -j -k -m -T 3 -K 30 -l "$IF" -p $ADDR:22 -r $H -P /var/run/dropbear.pid >> $LOG 2>&1 < /dev/null
+	k "dropbear exited rc=$?, restart"
+	[ "$(wc -c < $LOG)" -gt 100000 ] && : > $LOG
+	sleep 5
+done
