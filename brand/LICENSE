@@ -1,0 +1,20 @@
+homtom brand artwork
+
+Applies to the homtom mark, icon, splash and bootloader artwork and their
+sources in this directory (`homtom-mark.svg`, `homtom-icon.svg`, `splash/`,
+`variants/`), but not to the fonts in `fonts/`.
+
+Copyright (c) 2026 homtom contributors
+
+Licensed under the Creative Commons Attribution 4.0 International licence
+(CC-BY-4.0). You may share and adapt the artwork for any purpose, including
+commercially, if you give credit, link to the licence and say whether you made
+changes. Full text: https://creativecommons.org/licenses/by/4.0/legalcode
+
+The wordmark is set in Poppins, which stays under the SIL Open Font License
+1.1 (`fonts/OFL.txt`) and is not relicensed here. The CC-BY-4.0 grant covers
+the artwork as drawn, not the Poppins font software.
+
+The artwork gives no right to use the TomTom name or marks. TomTom is a
+trademark of its owner; this project is not affiliated with or endorsed by
+TomTom.
