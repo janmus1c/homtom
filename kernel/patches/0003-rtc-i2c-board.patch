@@ -1,0 +1,103 @@
+homtom: register the on-chip RTC and I2C bus 0
+
+Board file: add s3c_device_rtc (0x57000000, IRQ_RTC alarm) and
+s3c_device_i2c0 (0x54000000, IRQ_IIC, GPE14 SCL / GPE15 SDA function 2,
+default platform data: bus 0, 100 kHz) to homtom_devices[]. No I2C clients
+are declared, so the kernel generates no bus traffic by itself.
+
+rtc-s3c in 6.1 is DT-only: it takes its per-SoC data from the OF match
+table and fails with "failed getting s3c_rtc_data" otherwise, and its
+driver name "s3c-rtc" does not match the s3c24xx platform device. Add a
+platform_device_id table (s3c2410-rtc, s3c2443-rtc) and fall back to it
+when there is no OF match. The board renames the device to "s3c2443-rtc".
+
+Defconfig: I2C_CHARDEV built in (the image ships no i2c-dev.ko, and
+build-modules-tree.sh does not build it), RTC_HCTOSYS off (RTC content is
+unverified; the HA bridge sets the clock after each boot). RTC_DRV_S3C=y
+and I2C_S3C2410=y were already set.
+
+Not touched: GPJ10/GPJ14, GPL0-9, EPLL, INFORM0 (still 5 in map_io).
+
+Applies with -p1 to the kernel tree (.runtime/linux-trim-*). The board file
+hunk applies equally to kernel/homtom/mach-homtom-go630.c (identical copy).
+
+--- a/arch/arm/mach-s3c/mach-homtom-go630.c
++++ b/arch/arm/mach-s3c/mach-homtom-go630.c
+@@ -19,6 +19,7 @@
+ #include <linux/platform_data/mmc-sdhci-s3c.h>
+ #include <linux/platform_data/usb-s3c2410_udc.h>
+ #include <linux/platform_data/s3c-hsudc.h>
++#include <linux/platform_data/i2c-s3c2410.h>
+ #include <linux/memblock.h>
+ #include <linux/pm.h>
+ #include <linux/reboot.h>
+@@ -193,6 +194,8 @@
+ 	&s3c_device_hsmmc1,
+ 	&s3c_device_usb_hsudc,
+ 	&s3c2443_device_dma,
++	&s3c_device_rtc,
++	&s3c_device_i2c0,
+ };
+ 
+ static void homtom_paint_phys(unsigned long phys, u16 color)
+@@ -509,6 +512,9 @@
+ 			pd->phy_uninit = homtom_hsudc_phy_uninit;
+ 		}
+ 	}
++	/* On-chip RTC (0x57000000): rtc-s3c binds by this name. I2C0: GPE14 SCL, GPE15 SDA, 100 kHz, no clients declared. */
++	s3c_device_rtc.name = "s3c2443-rtc";
++	s3c_i2c0_set_platdata(NULL);
+ 	platform_add_devices(homtom_devices, ARRAY_SIZE(homtom_devices));
+ 	homtom_display_mark("11_post_devices", HOMTOM_COL_ORANGE);
+ }
+--- a/drivers/rtc/rtc-s3c.c
++++ b/drivers/rtc/rtc-s3c.c
+@@ -409,6 +409,9 @@
+ 
+ 	info->dev = &pdev->dev;
+ 	info->data = of_device_get_match_data(&pdev->dev);
++	if (!info->data && platform_get_device_id(pdev))
++		info->data = (const struct s3c_rtc_data *)
++			platform_get_device_id(pdev)->driver_data;
+ 	if (!info->data) {
+ 		dev_err(&pdev->dev, "failed getting s3c_rtc_data\n");
+ 		return -EINVAL;
+@@ -602,10 +605,19 @@
+ 	{ /* sentinel */ },
+ };
+ MODULE_DEVICE_TABLE(of, s3c_rtc_dt_match);
++
++/* Board files without device tree (s3c24xx) */
++static const struct platform_device_id s3c_rtc_driver_ids[] = {
++	{ .name = "s3c2410-rtc", .driver_data = (kernel_ulong_t)&s3c2410_rtc_data },
++	{ .name = "s3c2443-rtc", .driver_data = (kernel_ulong_t)&s3c2443_rtc_data },
++	{ }
++};
++MODULE_DEVICE_TABLE(platform, s3c_rtc_driver_ids);
+ 
+ static struct platform_driver s3c_rtc_driver = {
+ 	.probe		= s3c_rtc_probe,
+ 	.remove		= s3c_rtc_remove,
++	.id_table	= s3c_rtc_driver_ids,
+ 	.driver		= {
+ 		.name	= "s3c-rtc",
+ 		.pm	= &s3c_rtc_pm_ops,
+--- a/arch/arm/configs/homtom_defconfig
++++ b/arch/arm/configs/homtom_defconfig
+@@ -76,7 +76,7 @@
+ CONFIG_SERIAL_SAMSUNG=y
+ CONFIG_SERIAL_SAMSUNG_CONSOLE=y
+ CONFIG_SERIAL_DEV_BUS=m
+-CONFIG_I2C_CHARDEV=m
++CONFIG_I2C_CHARDEV=y
+ CONFIG_I2C_S3C2410=y
+ CONFIG_WATCHDOG=y
+ CONFIG_S3C2410_WATCHDOG=y
+@@ -90,6 +90,7 @@
+ CONFIG_MMC_SDHCI_S3C=y
+ CONFIG_MMC_S3C=y
+ CONFIG_RTC_CLASS=y
++# CONFIG_RTC_HCTOSYS is not set
+ CONFIG_RTC_DRV_S3C=y
+ CONFIG_DMADEVICES=y
+ CONFIG_S3C24XX_DMAC=y

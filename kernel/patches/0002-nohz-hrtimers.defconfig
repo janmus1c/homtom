@@ -1,0 +1,12 @@
+# Defconfig delta: tickless idle and high-resolution timers.
+# Append to arch/arm/configs/homtom_defconfig (kernel-trim variant), then run make homtom_defconfig.
+#
+# Clockevent: samsung_pwm_timer timer 3 (board: s3c24xx_set_timer_source(PWM3, PWM4)) advertises
+# CLOCK_EVT_FEAT_ONESHOT and implements set_next_event; registered with min 1, max 65535 cycles at
+# 1.32 MHz (757 ns resolution, longest single shot about 49.6 ms). Clocksource: timer 4, 16 bit,
+# CLOCK_SOURCE_IS_CONTINUOUS, so it is valid for high resolution mode. The 16-bit wrap is handled by the
+# core: idle sleeps are capped by timekeeping_max_deferment() (clocksource max_idle_ns, about 43 ms) and
+# by the clockevent max_delta, and sched_clock keeps an hrtimer that refreshes its epoch before the wrap.
+# Expected: about 25-40 timer wakeups per second when idle instead of 100, not zero.
+CONFIG_NO_HZ_IDLE=y
+CONFIG_HIGH_RES_TIMERS=y

@@ -1,0 +1,20 @@
+Register the per-channel DMA clock lookups that drivers/dma/s3c24xx-dma.c asks for ("dma.0".."dma.5" on
+device s3c2443-dma.0). Without them every physical channel fails devm_clk_get() at probe and stays invalid, so no
+dmaengine client (ASoC, SPI, UART) can get a channel on a non-DT S3C2443/2416 board. Optional: homtom-audio.ko does
+not need it. Not booted on the device.
+
+--- a/drivers/clk/samsung/clk-s3c2443.c	2026-11-07 15:55:35
++++ b/drivers/clk/samsung/clk-s3c2443.c	2026-11-07 15:55:35
+@@ -174,6 +174,12 @@
+ 	ALIAS(SCLK_I2S0, NULL, "i2s-if"),
+ 	ALIAS(HCLK_LCD, NULL, "lcd"),
+ 	ALIAS(SCLK_FIMD, NULL, "sclk_fimd"),
++	ALIAS(HCLK_DMA0, "s3c2443-dma.0", "dma.0"),
++	ALIAS(HCLK_DMA1, "s3c2443-dma.0", "dma.1"),
++	ALIAS(HCLK_DMA2, "s3c2443-dma.0", "dma.2"),
++	ALIAS(HCLK_DMA3, "s3c2443-dma.0", "dma.3"),
++	ALIAS(HCLK_DMA4, "s3c2443-dma.0", "dma.4"),
++	ALIAS(HCLK_DMA5, "s3c2443-dma.0", "dma.5"),
+ };
+ 
+ /* S3C2416 specific clocks */

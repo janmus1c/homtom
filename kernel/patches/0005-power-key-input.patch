@@ -1,0 +1,142 @@
+homtom: power key as an input device, no kernel power-off on hold
+
+The board file polled GPF0 (ON_OFF, active low) every 100 ms and called
+kernel_power_off() after a 2 s hold. Remove that: the kernel takes no
+action on the key any more, userland decides (short press = wake/UI,
+5 s = reboot to storage, 10 s = power off).
+
+Register a gpio-keys-polled device "homtom-keys" with one button,
+KEY_POWER on GPF0, active low, 50 ms poll, 50 ms debounce. Events appear
+on /dev/input/eventN (find N in /proc/bus/input/devices). Polled rather
+than interrupt-driven: request_irq would switch GPF0 to its EINT0 function,
+and statusd reads power_key from GPFDAT, which the S3C24xx manual calls
+undefined for pins in a function mode. As a plain input GPF0 keeps working
+for statusd.
+
+The remaining 1 Hz work only prints the console liveness beacon (same
+cadence as before: every second for 30 s, then every 10 s).
+
+KEY_POWER maps to a function-key string in the default VT keymap; nothing
+in this kernel powers off or reboots on it.
+
+Defconfig: CONFIG_KEYBOARD_GPIO_POLLED=y.
+
+Applies with -p1 after 0004.
+
+--- a/arch/arm/mach-s3c/mach-homtom-go630.c
++++ b/arch/arm/mach-s3c/mach-homtom-go630.c
+@@ -20,6 +20,8 @@
+ #include <linux/platform_data/usb-s3c2410_udc.h>
+ #include <linux/platform_data/s3c-hsudc.h>
+ #include <linux/platform_data/i2c-s3c2410.h>
++#include <linux/gpio_keys.h>
++#include <linux/input.h>
+ #include <linux/memblock.h>
+ #include <linux/pm.h>
+ #include <linux/reboot.h>
+@@ -189,6 +191,37 @@
+ 	.gpio_uninit	= homtom_hsudc_gpio_uninit,
+ 	.phy_init	= homtom_hsudc_phy_init,
+ 	.phy_uninit	= homtom_hsudc_phy_uninit,
++};
++
++/*
++ * Power key: stock ON_OFF = GPF0 (EINT0), active low. Polled gpio-keys input device reporting KEY_POWER on
++ * /dev/input/eventN ("homtom-keys"). Polled rather than interrupt-driven so GPF0 stays a plain input and statusd's
++ * GPFDAT read of power_key stays valid. The kernel takes no action on the key; hold times are userland policy.
++ */
++static struct gpio_keys_button homtom_buttons[] = {
++	{
++		.code			= KEY_POWER,
++		.gpio			= S3C2410_GPF(0),
++		.active_low		= 1,
++		.desc			= "power",
++		.type			= EV_KEY,
++		.debounce_interval	= 50,
++	},
++};
++
++static struct gpio_keys_platform_data homtom_keys_pdata = {
++	.buttons	= homtom_buttons,
++	.nbuttons	= ARRAY_SIZE(homtom_buttons),
++	.poll_interval	= 50,
++	.name		= "homtom-keys",
++};
++
++static struct platform_device homtom_keys_device = {
++	.name	= "gpio-keys-polled",
++	.id	= -1,
++	.dev	= {
++		.platform_data	= &homtom_keys_pdata,
++	},
+ };
+ 
+ static struct platform_device *homtom_devices[] __initdata = {
+@@ -198,6 +231,7 @@
+ 	&s3c2443_device_dma,
+ 	&s3c_device_rtc,
+ 	&s3c_device_i2c0,
++	&homtom_keys_device,
+ };
+ 
+ static void homtom_paint_phys(unsigned long phys, u16 color)
+@@ -471,42 +505,26 @@
+ }
+ late_initcall(homtom_usb_pullup_init);
+ 
+-/*
+- * Power key: stock ON_OFF = GPF0, inverted (pressed = low). Hold 2 s => kernel_power_off()
+- * (GPJ10 on battery; reboots on USB bus power). Arms only after the key has been seen released, so the
+- * press that switched the device on cannot immediately switch it off again.
+- */
+-static struct delayed_work homtom_pwrkey_work;
+-static unsigned int homtom_pwrkey_held;
+-static bool homtom_pwrkey_armed;
++/* Liveness beacon on the LCD console: once a second for the first 30 s, then every 10 s. */
++static struct delayed_work homtom_alive_work;
+ 
+-static void homtom_pwrkey_poll(struct work_struct *w)
++static void homtom_alive_poll(struct work_struct *w)
+ {
+ 	static unsigned int polls;
+ 
+-	/* liveness beacon on the LCD console: 1/s for the first 30 s, then every 10 s */
+-	if (++polls % 10 == 0 && (polls < 300 || polls % 100 == 0))
++	polls++;
++	if (polls < 30 || polls % 10 == 0)
+ 		pr_info("homtom: alive jiffies %lu\n", jiffies);
+-	if (gpio_get_value(S3C2410_GPF(0))) {
+-		homtom_pwrkey_armed = true;
+-		homtom_pwrkey_held = 0;
+-	} else if (homtom_pwrkey_armed && ++homtom_pwrkey_held >= 20) {
+-		pr_emerg("homtom: power key held 2 s, powering off\n");
+-		kernel_power_off();
+-	}
+-	schedule_delayed_work(&homtom_pwrkey_work, HZ / 10);
++	schedule_delayed_work(&homtom_alive_work, HZ);
+ }
+ 
+-static int __init homtom_pwrkey_init(void)
++static int __init homtom_alive_init(void)
+ {
+-	if (gpio_request_one(S3C2410_GPF(0), GPIOF_IN, "power-key"))
+-		return 0;
+-	pr_info("homtom: power key GPF0 idle level=%d\n", gpio_get_value(S3C2410_GPF(0)));
+-	INIT_DELAYED_WORK(&homtom_pwrkey_work, homtom_pwrkey_poll);
+-	schedule_delayed_work(&homtom_pwrkey_work, HZ);
++	INIT_DELAYED_WORK(&homtom_alive_work, homtom_alive_poll);
++	schedule_delayed_work(&homtom_alive_work, HZ);
+ 	return 0;
+ }
+-late_initcall(homtom_pwrkey_init);
++late_initcall(homtom_alive_init);
+ 
+ /*
+  * The bootloader leaves interrupt sources unmasked/pending (INTMSK was 0x6FFB5CBF when the machine froze ~10 s
+--- a/arch/arm/configs/homtom_defconfig
++++ b/arch/arm/configs/homtom_defconfig
+@@ -136,3 +136,4 @@
+ # CONFIG_STACKPROTECTOR_STRONG is not set
+ CONFIG_NO_HZ_IDLE=y
+ CONFIG_HIGH_RES_TIMERS=y
++CONFIG_KEYBOARD_GPIO_POLLED=y

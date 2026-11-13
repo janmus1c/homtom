@@ -1,0 +1,429 @@
+homtom: adopt the bootloader frame, quiet LCD console by default
+
+TTBL scans its splash out of 0x30400000-0x3043FBFF. The 6.1 Image is
+inflated to 0x30008000-0x30650494 (bss to 0x30674048), so the decompressor
+writes kernel .text (VA 0xC0400000-0xC043FBFF) into the visible buffer: the
+coloured noise after the splash. setup_arch() then moved the LCD DMA to the
+reserved buffer at 0x33F00000 without filling it (stale RAM), and the
+console cleared it to black and drew the boot log (verbose default).
+
+Decompressor (boot/compressed/misc.c, C, CONFIG_MACH_TOMTOMGO only):
+ - Before inflating, copy the frame the LCD is scanning (LCDSADDR1/2) to
+   0x33F00000, clean those D-cache lines and drain the write buffer, then
+   point LCDSADDR1/2 at the copy. Same pixels, so the switch is invisible.
+   Skipped when ENVID is off, the LCD already scans 0x33F00000, the size is
+   0 or above 256 KiB, the source is outside RAM or overlaps the target, or
+   the decompressor heap reaches 0x33F00000. Nothing is added to head.S.
+
+Board file:
+ - homtom_reserve(): if the LCD already scans 0x33F00000, set
+   homtom_fb_adopted and leave the LCD registers alone. Otherwise (fallback)
+   mask the stale buffer with a black TPAL overlay, then relocate as before.
+ - homtom_map_io(): TPAL is no longer cleared there (ladder builds only);
+   homtom_fbtext_init() clears it after drawing.
+ - /sys/kernel/homtom_splash becomes readable (1 = muted). INFORM0=5 in
+   map_io is unchanged.
+
+homtom-fbtext.c:
+ - Quiet by default. "homtom.verbose=1" (early_param) restores the old
+   verbose console. The console is muted before register_console(), so the
+   CON_PRINTBUFFER replay draws nothing. With an adopted frame no pixel is
+   written; otherwise the built-in splash (pixel-identical to SPLASHW.BMP)
+   is drawn. "homtom.quiet" is no longer parsed (quiet is the default).
+ - Boot prints "homtom: LCD console muted, bootloader frame adopted" (or
+   "not adopted" / "verbose") for the device check.
+ - homtom_splash 1 while muted draws nothing (the GUI mute no longer
+   repaints the splash); 0 unmutes under console_lock, clears the screen and
+   redraws the newest log lines that fit, then continues live.
+ - Boot guard: if nothing has written homtom_splash 60 s after boot, the
+   console unmutes and prints "homtom: boot incomplete: ...".
+ - The oops/panic paths are unchanged: the first console write with
+   oops_in_progress clears the screen and turns the panel on, and the kmsg
+   dumper redraws the incident and freezes the console.
+
+Applies with -p1 after 0006 (tree .runtime/linux-trim-k3 -> linux-trim-k4).
+No .config change.
+
+--- a/arch/arm/boot/compressed/misc.c
++++ b/arch/arm/boot/compressed/misc.c
+@@ -133,7 +133,47 @@
+ 
+ extern int do_decompress(u8 *input, int len, u8 *output, void (*error)(char *x));
+ 
++#ifdef CONFIG_MACH_TOMTOMGO
++/*
++ * homtom GO 630: TTBL leaves its splash on screen in a buffer at 0x30400000, and the kernel Image inflates over it (kernel
++ * text there shows as coloured noise). Copy the frame the LCD is showing into the buffer the kernel keeps reserved
++ * (0x33F00000) and point the LCD DMA at it before inflating. Both buffers then hold the same pixels, so the switch is
++ * invisible. Nothing changes when the LCD is off, already scans 0x33F00000, or any value is out of range.
++ */
++#define HOMTOM_LCD		0x4D000000UL
++#define HOMTOM_FB_PHYS		0x33F00000UL
++#define HOMTOM_FB_MAX		0x40000UL
+ 
++extern void *memcpy(void *dest, const void *src, size_t n);
++
++static void homtom_adopt_fb(unsigned long free_end)
++{
++	volatile u32 *lcd = (volatile u32 *)HOMTOM_LCD;
++	u32 s1 = lcd[5], s2 = lcd[6];
++	unsigned long src = (unsigned long)(s1 & 0x3fffffff) << 1;
++	unsigned long bytes = (unsigned long)((s2 - s1) & 0x1fffff) << 1;
++	unsigned long p;
++
++	if (!(lcd[0] & 1) || src == HOMTOM_FB_PHYS)
++		return;
++	if (!bytes || bytes > HOMTOM_FB_MAX || src < 0x30000000UL || src + bytes > 0x34000000UL)
++		return;
++	if (src < HOMTOM_FB_PHYS + HOMTOM_FB_MAX && src + bytes > HOMTOM_FB_PHYS)
++		return;
++	if (free_end > HOMTOM_FB_PHYS)
++		return;
++
++	memcpy((void *)HOMTOM_FB_PHYS, (const void *)src, bytes);
++	/* RAM is write-back cacheable here: clean the copy (ARMv4 clean D line by MVA, VA == PA) and drain the write buffer. */
++	for (p = HOMTOM_FB_PHYS; p < HOMTOM_FB_PHYS + bytes; p += 32)
++		asm volatile("mcr p15, 0, %0, c7, c10, 1" : : "r" (p) : "memory");
++	asm volatile("mcr p15, 0, %0, c7, c10, 4" : : "r" (0) : "memory");
++
++	lcd[5] = HOMTOM_FB_PHYS >> 1;
++	lcd[6] = ((HOMTOM_FB_PHYS >> 1) + (bytes >> 1)) & 0x1fffff;
++}
++#endif
++
+ void
+ decompress_kernel(unsigned long output_start, unsigned long free_mem_ptr_p,
+ 		unsigned long free_mem_ptr_end_p,
+@@ -146,6 +186,9 @@
+ 	free_mem_end_ptr	= free_mem_ptr_end_p;
+ 	__machine_arch_type	= arch_id;
+ 
++#ifdef CONFIG_MACH_TOMTOMGO
++	homtom_adopt_fb(free_mem_ptr_end_p);
++#endif
+ #ifdef CONFIG_ARCH_EP93XX
+ 	ep93xx_decomp_setup();
+ #endif
+--- a/arch/arm/mach-s3c/mach-homtom-go630.c
++++ b/arch/arm/mach-s3c/mach-homtom-go630.c
+@@ -301,7 +301,7 @@
+ #endif
+ }
+ 
+-static void homtom_clear_tpal(void)
++static void __maybe_unused homtom_clear_tpal(void)
+ {
+ 	__raw_writel(0, HOMTOM_VA_LCD + HOMTOM_TPAL);
+ }
+@@ -360,7 +360,10 @@
+ 	 */
+ 	iotable_init(homtom_lcd_iodesc, ARRAY_SIZE(homtom_lcd_iodesc));
+ 	local_flush_tlb_all();
++	/* Normal builds leave TPAL to homtom_fbtext_init(): it may be masking a not yet drawn buffer (homtom_reserve()). */
++#ifdef HOMTOM_COLOR_LADDER
+ 	homtom_clear_tpal();
++#endif
+ 	homtom_mark_pause();
+ 	homtom_mark_tpal(HOMTOM_COL_RED_ENTER);
+ 	homtom_mark_pause();
+@@ -388,13 +391,17 @@
+ }
+ 
+ /*
+- * The bootloader framebuffer is at phys 0x30400000, inside the decompressed 9 MB kernel image
+- * (PCs of every crash sat right past 0xC043FC00 = FB end). Point the LCD DMA at a reserved buffer
+- * at the top of RAM before anything draws.
++ * The bootloader framebuffer is at phys 0x30400000, inside the decompressed kernel image
++ * (PCs of every crash sat right past 0xC043FC00 = FB end). The LCD DMA must scan a reserved buffer
++ * at the top of RAM. The decompressor (boot/compressed/misc.c) normally copies the bootloader frame
++ * there and moves the DMA before inflating; then the screen is adopted as it is.
+  */
+ #define HOMTOM_FB_PHYS		0x33F00000UL
+ #define HOMTOM_FB_BYTES		0x40000UL
+ 
++/* True when the LCD already scanned HOMTOM_FB_PHYS at reserve time: the bootloader frame is on screen and intact. */
++bool homtom_fb_adopted;
++
+ static void __init homtom_reserve(void)
+ {
+ 	void __iomem *lcd = (void __iomem *)HOMTOM_LCD_PA;
+@@ -405,6 +412,12 @@
+ 
+ 	memblock_reserve(HOMTOM_FB_PHYS, HOMTOM_FB_BYTES);
+ 	memblock_reserve(HOMTOM_RAMOOPS_PHYS, HOMTOM_RAMOOPS_BYTES);
++	if (s1 == n1) {
++		homtom_fb_adopted = true;
++		return;
++	}
++	/* Fallback: the new buffer holds stale RAM. A black overlay hides it until homtom_fbtext_init() draws and clears TPAL. */
++	__raw_writel(1u << 24, lcd + HOMTOM_TPAL);
+ 	__raw_writel(n1, lcd + HOMTOM_LCDSADDR1);
+ 	__raw_writel((n1 + span) & 0x1fffff, lcd + 0x18);
+ }
+@@ -532,8 +545,16 @@
+ 	homtom_fbtext_splash(n && buf[0] != '0');
+ 	return n;
+ }
+-static struct kobj_attribute homtom_splash_attr = __ATTR(homtom_splash, 0200, NULL, homtom_splash_store);
+ 
++extern bool homtom_fbtext_muted(void);
++
++/* Reads 1 while the LCD console is muted, 0 while it draws text. */
++static ssize_t homtom_splash_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
++{
++	return sysfs_emit(buf, "%d\n", homtom_fbtext_muted());
++}
++static struct kobj_attribute homtom_splash_attr = __ATTR(homtom_splash, 0600, homtom_splash_show, homtom_splash_store);
++
+ static struct kobj_attribute homtom_usb_pullup_attr = __ATTR(homtom_usb_pullup, 0200, NULL, homtom_usb_pullup_store);
+ 
+ static int __init homtom_usb_pullup_init(void)
+--- a/arch/arm/kernel/homtom-fbtext.c
++++ b/arch/arm/kernel/homtom-fbtext.c
+@@ -10,12 +10,14 @@
+ #include <linux/console.h>
+ #include <linux/font.h>
+ #include <linux/io.h>
++#include <linux/jiffies.h>
+ #include <linux/kernel.h>
+ #include <linux/init.h>
+ #include <linux/kmsg_dump.h>
+ #include <linux/printk.h>
+ #include <linux/string.h>
+ #include <linux/types.h>
++#include <linux/workqueue.h>
+ #include <asm/cacheflush.h>
+ #include <asm/memory.h>
+ 
+@@ -85,12 +87,29 @@
+ 	0, FBT_FG << 16, FBT_FG, FBT_FG | (FBT_FG << 16),
+ };
+ 
+-/* Boot splash (480x272 RGB565, brand/splash). Text console is verbose by default; "homtom.quiet" on the command line or /sys/kernel/homtom_splash=1 shows the splash and mutes text until an oops. */
++/*
++ * Quiet by default: the console registers muted and leaves the screen as the bootloader left it (the board code adopts
++ * the bootloader frame, homtom_fb_adopted). "homtom.verbose=1" on the command line draws boot text from the start.
++ * /sys/kernel/homtom_splash: 1 mutes (no redraw when already muted), 0 unmutes and redraws the log tail. An oops or
++ * panic always unmutes. Without any write to homtom_splash within FBT_GUARD_S of boot the console unmutes itself.
++ * The splash below (480x272 RGB565, brand/splash) is drawn only when the bootloader frame was not adopted.
++ */
+ asm(".section .rodata,\"a\"\n.balign 4\nhomtom_splash_fb:\n.incbin \"arch/arm/kernel/homtom-splash.fb\"\n.previous\n");
+ extern const u8 homtom_splash_fb[FBT_W * FBT_H * 2];
++extern bool homtom_fb_adopted;
+ 
++#define FBT_GUARD_S		60
++
+ static u16 *fbt_fb;
+ static bool fbt_quiet;
++static bool fbt_verbose, fbt_user_seen;
++
++static int __init fbt_verbose_param(char *s)
++{
++	fbt_verbose = s && s[0] == '1';
++	return 0;
++}
++early_param("homtom.verbose", fbt_verbose_param);
+ static const u8 *fbt_glyphs;
+ static unsigned int fbt_col, fbt_row;
+ static unsigned int fbt_dirty_lo, fbt_dirty_hi;
+@@ -289,24 +308,26 @@
+ 	}
+ }
+ 
+-static void fbt_dump(struct kmsg_dumper *dumper, enum kmsg_dump_reason reason)
++#define FBT_LINE(i)	(fbt_dump_buf + fbt_dump_line[(i) % FBT_DUMP_LINES])
++
++/*
++ * Copy the newest 16 KiB of the log into fbt_dump_buf and split it into NUL-terminated lines. Returns the line count;
++ * lines first..count-1 are addressable with FBT_LINE().
++ */
++static unsigned int fbt_load_log(unsigned int *first)
+ {
+ 	struct kmsg_dump_iter iter;
+ 	size_t len = 0;
+-	unsigned int n = 0, first, i, start, last_row;
+-	int panic_i = -1, head_i = -1;
++	unsigned int n = 0;
+ 	char *p, *end;
+ 
+-	if (!fbt_fb || (reason != KMSG_DUMP_OOPS && reason != KMSG_DUMP_PANIC))
+-		return;
+-
+ 	kmsg_dump_rewind(&iter);
+ 	if (!kmsg_dump_get_buffer(&iter, false, fbt_dump_buf, sizeof(fbt_dump_buf) - 1, &len) || !len)
+-		return;
++		return 0;
+ 	end = fbt_dump_buf + len;
+ 	*end = 0;
+ 
+-	/* Split into NUL-terminated lines; keep the offsets of the newest FBT_DUMP_LINES. */
++	/* Keep the offsets of the newest FBT_DUMP_LINES. */
+ 	for (p = fbt_dump_buf; p < end; n++) {
+ 		char *nl = strchrnul(p, '\n');
+ 
+@@ -314,10 +335,58 @@
+ 		fbt_dump_line[n % FBT_DUMP_LINES] = p - fbt_dump_buf;
+ 		p = nl + 1;
+ 	}
++	*first = n > FBT_DUMP_LINES ? n - FBT_DUMP_LINES : 0;
++	return n;
++}
++
++/*
++ * Unmute: clear the screen and draw the newest log lines that fit, leaving the cursor on the first free row so live
++ * output continues below them. Caller holds console_lock, so fbt_write() cannot run at the same time.
++ */
++static void fbt_show_tail(void)
++{
++	unsigned int n, first = 0, i, start, rows = 0;
++
++	fbt_quiet = false;
++	fbt_oops = false;
++	fbt_frozen = false;
++	fbt_dirty_lo = FBT_H;
++	fbt_dirty_hi = 0;
++	fbt_clear_rows(0, FBT_ROWS);
++	fbt_row = 0;
++	fbt_col = 0;
++
++	n = fbt_load_log(&first);
++	for (start = n; start > first; start--) {
++		unsigned int len = strlen(fbt_strip_time(FBT_LINE(start - 1)));
++		unsigned int need = len ? DIV_ROUND_UP(len, FBT_COLS) : 1;
++
++		if (rows + need > FBT_ROWS - 1)
++			break;
++		rows += need;
++	}
++	for (i = start; i < n; i++) {
++		fbt_draw_line(fbt_strip_time(FBT_LINE(i)), FBT_ROWS - 2);
++		fbt_row++;
++	}
++	fbt_col = 0;
++	if (fbt_row >= FBT_ROWS)
++		fbt_row = FBT_ROWS - 1;
++	__raw_writel(0, FBT_LCD + FBT_TPAL);
++	__cpuc_flush_dcache_area(fbt_fb, FBT_W * FBT_H * 2);
++}
++
++static void fbt_dump(struct kmsg_dumper *dumper, enum kmsg_dump_reason reason)
++{
++	unsigned int n, first = 0, i, start, last_row;
++	int panic_i = -1, head_i = -1;
++
++	if (!fbt_fb || (reason != KMSG_DUMP_OOPS && reason != KMSG_DUMP_PANIC))
++		return;
++
++	n = fbt_load_log(&first);
+ 	if (!n)
+ 		return;
+-	first = n > FBT_DUMP_LINES ? n - FBT_DUMP_LINES : 0;
+-#define FBT_LINE(i)	(fbt_dump_buf + fbt_dump_line[(i) % FBT_DUMP_LINES])
+ 
+ 	if (reason == KMSG_DUMP_PANIC)
+ 		for (i = n; i-- > first;)
+@@ -366,7 +435,6 @@
+ 		fbt_row = FBT_ROWS - 1;
+ 		fbt_draw_line(fbt_strip_time(FBT_LINE(panic_i)), FBT_ROWS - 1);
+ 	}
+-#undef FBT_LINE
+ 
+ 	/* Freeze: later console output (the panic tail, "Rebooting in") must not scroll this away. */
+ 	fbt_row = FBT_ROWS - 1;
+@@ -402,38 +470,86 @@
+ 	if (phys < FBT_RAM_START || phys > FBT_RAM_END - FBT_W * FBT_H * 2)
+ 		return;
+ 
+-	__raw_writel(0, FBT_LCD + FBT_TPAL);
+ 	fbt_glyphs = FBT_FONT.data;
+ 	fbt_fb = (u16 *)phys_to_virt(phys);
+-	if (!strstr(boot_command_line, "homtom.quiet")) {
++	if (fbt_verbose) {
+ 		memset(fbt_rowp(0), 0, FBT_ROWS * FBT_ROW_BYTES);
+ 		__cpuc_flush_dcache_area(fbt_rowp(0), FBT_ROWS * FBT_ROW_BYTES);
+ 	} else {
++		/* Muted before register_console(), so the CON_PRINTBUFFER replay draws nothing either. */
+ 		fbt_quiet = true;
+-		memcpy(fbt_fb, homtom_splash_fb, FBT_W * FBT_H * 2);
+-		__cpuc_flush_dcache_area(fbt_fb, FBT_W * FBT_H * 2);
++		if (!homtom_fb_adopted) {
++			memcpy(fbt_fb, homtom_splash_fb, FBT_W * FBT_H * 2);
++			__cpuc_flush_dcache_area(fbt_fb, FBT_W * FBT_H * 2);
++		}
+ 	}
++	__raw_writel(0, FBT_LCD + FBT_TPAL);
+ 	fbt_col = 0;
+ 	fbt_row = 0;
+ 
+ 	register_console(&fbt_console);
+ 	kmsg_dump_register(&fbt_dumper);
++	pr_info("homtom: LCD console %s, bootloader frame %s\n", fbt_verbose ? "verbose" : "muted",
++		homtom_fb_adopted ? "adopted" : "not adopted");
+ }
+ 
++/* Unmute from process context; a no-op when already unmuted or not set up. */
++static void fbt_unmute(void)
++{
++	console_lock();
++	if (fbt_fb && fbt_quiet)
++		fbt_show_tail();
++	console_unlock();
++}
++
+ void homtom_fbtext_splash(bool on)
+ {
++	fbt_user_seen = true;
+ 	if (!fbt_fb)
+ 		return;
+-	if (on) {
+-		fbt_quiet = true;
+-		memcpy(fbt_fb, homtom_splash_fb, FBT_W * FBT_H * 2);
+-		__cpuc_flush_dcache_area(fbt_fb, FBT_W * FBT_H * 2);
+-	} else {
+-		fbt_quiet = false;
++	if (!on) {
++		fbt_unmute();
++		return;
+ 	}
++	/* Already muted: keep whatever is on screen (bootloader frame or GUI), draw nothing. */
++	if (fbt_quiet)
++		return;
++	console_lock();
++	fbt_quiet = true;
++	memcpy(fbt_fb, homtom_splash_fb, FBT_W * FBT_H * 2);
++	__cpuc_flush_dcache_area(fbt_fb, FBT_W * FBT_H * 2);
++	console_unlock();
+ }
+ 
++bool homtom_fbtext_muted(void)
++{
++	return fbt_fb && fbt_quiet;
++}
++
+ /*
++ * Boot guard: init writes /sys/kernel/homtom_splash early. If nothing has written it FBT_GUARD_S after boot, userspace
++ * never started (or hangs before init.sh); show the log instead of the splash.
++ */
++static void fbt_guard_fn(struct work_struct *w)
++{
++	if (fbt_user_seen || !homtom_fbtext_muted())
++		return;
++	fbt_unmute();
++	pr_emerg("homtom: boot incomplete: no userspace after %d s, console unmuted\n", FBT_GUARD_S);
++}
++static DECLARE_DELAYED_WORK(fbt_guard_work, fbt_guard_fn);
++
++static int __init fbt_guard_init(void)
++{
++	long d = (long)(INITIAL_JIFFIES + FBT_GUARD_S * HZ - jiffies);
++
++	if (fbt_fb && fbt_quiet)
++		schedule_delayed_work(&fbt_guard_work, d > 0 ? d : 0);
++	return 0;
++}
++late_initcall(fbt_guard_init);
++
++/*
+  * Home the cursor so the next console line lands on the top row. Call it with
+  * console_lock held (or where nothing else can be printing) to avoid racing
+  * fbt_write(); a race only misplaces text, the cursor is clamped on entry.

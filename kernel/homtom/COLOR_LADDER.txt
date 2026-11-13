@@ -1,0 +1,271 @@
+Homtom 6.1 — ladder-skbisect (after physical BLUE on prepage)
+
+Physical BLUE on prepage (1db48fa4…): this build; 6i OK; never reached
+paging_init ORANGE ⇒ hang in start_kernel…setup_arch before that mark.
+
+PA==VA idmap still live until prepare_page_table():
+  6i  BLUE    #0000FF   before start_kernel
+  sk  WHITE   #FFFFFF   first thing in start_kernel
+  md  CYAN    #00FFFF   setup_arch after machine_desc set (mach 605 matched)
+  pp  YELLOW  #FFFF00   setup_arch immediately before paging_init()
+  6j  ORANGE  #FF8000   paging_init before prepare_page_table()
+
+Then idmap torn down; map_io uses HOMTOM_VA_LCD:
+  clear TPAL → RED …
+
+Hold:
+  BLUE   → never entered start_kernel (or WHITE MMIO failed)
+  WHITE  → in start_kernel/setup_arch before machine_desc assigned
+           (CPU/machine probe, or dump_machine_table spin)
+  CYAN   → machine OK; died before paging_init call
+  YELLOW → about to call paging_init; died before ORANGE store
+  ORANGE → inside paging_init / later (previous map_io theory)
+
+ladder-setuparch (after physical WHITE on skbisect): split WHITE window
+  WHITE   → died inside setup_processor()
+  MAGENTA → setup_processor done; died in FDT/atags probe (__atags_pointer deref)
+  GREEN   → FDT probe done; died in setup_machine_tags / machine match
+  CYAN    → machine matched (see above)
+
+ladder-mtags (after physical GREEN on setuparch): inside setup_machine_tags
+  GREEN   → died before/at machine lookup loop
+  RED     → no machine matched r1 (≠605): returns NULL → dump_machine_table spin
+  PURPLE  → matched (605); died choosing tags (atags_vaddr deref / convert)
+  PINK    → tags chosen; died in mdesc->fixup or squash_mem_tags/save_atags/parse_tags
+  TEAL    → parse_tags done; died after return / before CYAN (strlcpy, dump_stack_set_arch_desc)
+
+ladder-r1dump (after physical RED on mtags: r1 != 605):
+  RED 1s, then 16x [WHITE short, G=1/B=0] = r1 bits 15..0, then
+  YELLOW if r1>>16 != 0 else RED (long). Then machine forced to 605 and boot
+  continues (PURPLE/PINK/TEAL/CYAN… as before).
+
+ladder-pg (after r1dump: bootloader r1 = 0; machine forced to 605; ORANGE reached):
+  LCD PA==VA section kept alive through paging_init; mem=64M@0x30000000 on cmdline.
+  ORANGE  #FF8000  paging_init entry
+  LIME    #80FF00  prepare_page_table done
+  BROWN   #804000  map_lowmem done
+  GRAY    #808080  map_kernel/dma_contiguous_remap done (before devicemaps_init)
+  NAVY    #000080  devicemaps_init (incl. homtom_map_io) done
+  MAROON  #800000  before bootmem_init
+  GOLD    #FFC000  bootmem_init done (paging_init complete)
+  Last colour held = last completed stage; hang is in the NEXT stage.
+  (map_io's own RED/turquoise/yellow marks may flash inside the NAVY stage.)
+
+ladder-pt (after ladder-pg held ORANGE: hang inside prepare_page_table):
+  ORANGE  #FF8000  paging_init entry
+  MINT    #80FF80  prepare_page_table: loop clearing [0, MODULES_VADDR) done
+  SALMON  #FF8080  prepare_page_table: loop clearing [MODULES_VADDR, PAGE_OFFSET) done
+  LIME    #80FF00  prepare_page_table returned (rest = end-of-lowmem..VMALLOC_END clear)
+  then BROWN/GRAY/NAVY/MAROON/GOLD as in ladder-pg.
+  ORANGE again ⇒ loop1 hangs/aborts (or the LCD section is gone: MMIO abort on MINT write).
+
+ladder-ptloop (ladder-pt held ORANGE): marks inside prepare_page_table loop 1, after clearing PMD at:
+  CYAN    addr 0x00000000   WHITE addr 0x34000000 (past DRAM idmap)
+  MAGENTA addr 0x2E000000   BLUE  addr 0x50000000 (past LCD/IO)
+  then MINT (loop1 done), SALMON, LIME, ...
+  ORANGE ⇒ died clearing PMD[0] (or first iteration); CYAN ⇒ 0..0x2E; MAGENTA ⇒ 0x2E..0x34
+  (DRAM idmap region); WHITE ⇒ 0x34..0x50 (incl. skipped LCD); BLUE ⇒ 0x50..MODULES_VADDR.
+
+ladder-ptentry (ptloop still ORANGE): window between ORANGE and first post-clear mark:
+  ORANGE  #FF8000  paging_init, before prepare_page_table()
+  YELLOW  #FFFF00  prepare_page_table() entered
+  MAGENTA #FF00FF  loop iteration 0, immediately BEFORE pmd_clear(PMD[0])
+  CYAN    #00FFFF  after pmd_clear(PMD[0])
+  GREEN   0x2E000000 cleared, WHITE 0x34000000, BLUE 0x50000000, MINT loop1 done.
+  ORANGE again ⇒ prepare_page_table is never entered (ORANGE mark/pause or the call itself).
+
+NOTE: ORANGE (#FF8000) is also painted by the pre-MMU 6f_probe in head.S, so an ORANGE
+hold is ambiguous. From ladder-ptentry on, paging_init entry is DEEP PINK (#FF1493)
+(reddish pink, not the violet-pink MAGENTA). ORANGE now means: stuck at/before the 6f probe
+stage OR a stale paint — i.e. paging_init was NOT reached.
+
+CORRECTION (2026-11-06): the ORANGE holds since ladder-pg were NOT paging_init. ORANGE (#FF8000)
+is the board's "11 post_devices" mark at the end of homtom_machine_init (arch_initcall), so the
+kernel got far past paging_init/map_io. WHITE = late_initcall (12_late). Either a later
+initcall hangs, or the LCD stops updating while the kernel runs.
+ladder-initcall: mark at the START of each initcall level (0.25 s each):
+  L0 pure DARKGRAY, L1 core RED, L2 postcore YELLOW, L3 arch CYAN, L4 subsys MAGENTA,
+  L5 fs BLUE, L6 device GREEN, L7 late WHITE; DEEP PINK just before freeing init memory
+  (= kernel_init reached the end of init; /init about to run).
+  Final hold: the last level ENTERED. ORANGE after CYAN = machine_init finished inside L3.
+
+ladder-icidx (replaces colour level marks): before each initcall (levels 0..7, in order) the
+kernel draws its global index as 10 squares, MSB left (white=1, black=0), red bar at left edge,
+on the framebuffer (TPAL cleared). A hang shows the index of the initcall that never returned.
+Decode with: python3 kernel/scripts/initcall-table.py <index>
+
+ladder-fix1 (bugs found by source review, 2026-11-06): board passed 4 UART cfgs into a 3-entry array
+(overran samsung_cpu_id -> no gpiolib chips, s3c_arch_init skipped); fixed to 3. Board-specific
+hsudc phy_init (legacy v2 sequence), clk_prepare_enable in s3c-hsudc, clk_ignore_unused on cmdline.
+
+ladder-dbg (fix2 result: index 0001011011 = 91 usb_common_init, trivial function => likely a crash or
+blocked task after it, or a misread bit). Display now:
+  row y=110: index, 10 squares MSB-left, white=1; row y=156: its complement (every column one white
+  one black — misreads obvious); top-right square blinks white/blue about every 0.64s while timer ticks
+  run (static => CPU dead / IRQs off / oops loop); on oops or panic the screen shows a RED band with
+  PC (y=196) and LR (y=216) as 32 squares, MSB left, white=1. Decode: kernel/scripts/initcall-table.py
+  (initcalls) / System.map (addresses).
+
+ladder-dbg2 (dbg result: panic from do_exit = "Attempted to kill init" after PID 1 oopsed in initcall 91;
+the panic hook overwrote the oops PC/LR). Layout now (all 32 squares, MSB left, white=1):
+  y=180 faulting address (DFAR)   y=196 PC   y=212 LR   y=228 FSR   (RED band y=176..272, from
+  __do_kernel_fault; die() also redraws PC/LR rows)   y=248 panic() caller (BLUE band y=240..272)
+
+ladder-dbg2 (dbg result: panic from do_exit = "Attempted to kill init" after PID 1 oopsed in initcall 91;
+the panic hook overwrote the oops PC/LR). Layout now (all 32 squares, MSB left, white=1):
+  y=180 faulting address (DFAR)   y=196 PC   y=212 LR   y=228 FSR   (RED band y=176..272, from
+  __do_kernel_fault; die() also redraws PC/LR rows)   y=248 panic() caller (BLUE band y=240..272)
+
+ladder-text (photo IMG_3650 decode: PC=mmc_decode_csd+0x60, str r0,[r3,#640] with r3=0 => NULL card; DFAR 0x280,
+LR 0x278 = r3+632, FSR 0x805 (write, section translation fault); panic caller do_exit). Crash/oops screen is now
+hex TEXT on black: row0 DFAR FSR PC LR; row1 SP CPSR pid preempt_count; rows2-4 r0..r11; rows5-14 40 stack words.
+FB region is memblock_reserve()d in the board .reserve hook so debug drawing cannot corrupt kernel memory.
+
+ROOT CAUSE (photos IMG_3650/3651, 2026-11-06): the bootloader framebuffer is at phys 0x30400000..0x3043FC00,
+inside the decompressed ~9 MB 6.1 kernel (2.6.13 was ~2 MB and never overlapped). HOMTOM_PROBE_PRE (6f_probe)
+lime-filled it => kernel text corrupted => every "hang" so far (cold code first executed in that range:
+mmc_register_bus c0439d14 etc.). Fix: probe fill disabled; board .reserve relocates LCD DMA to 0x33F00000
+(reserved) before any drawing. Dump row 14 now = FB phys, LCDSADDR1/2/3 (expect 33F00000).
+
+ladder-live (fbfix result: lime bg + index squares = 218 s3c2410fb_init, heartbeat square stuck blue => tick dead
+or CPU hung). Top row of text, refreshed every 32 ticks while ticks run:
+  [jiffies] [PC of interrupted context] [LR of interrupted context] [initcall index being run]
+  jiffies stuck => no ticks (IRQs off / CPU hung); PC changing/idle => kernel alive but initcall blocked.
+
+ladder-wdt (live photo IMG_3652): jiffies FFFF8E90 = 960 ticks after boot (9.6 s) then dead, index word 0xDB (initcall 218
+s3c2410fb_init running). Suspects: bootloader-armed WDT (disabled in map_io now), IRQ storm, bus hang. Live rows:
+  row0: jiffies PC LR idx   row1: WTCON WTCNT SRCPND INTPND   row2: INTMSK SUBSRCPND INTSUBMSK CPSR
+
+ladder-mem (IMG_3653: identical jiffies FFFF8E90 / PC C0058984 / LR C0058980 / idx DB in two builds; WTCON 0 => not WDT;
+disasm says c0058984 is `bl sscanf` in wakeup_count_store => either fixed spin or corrupted text). Live display now refreshes
+every 4 ticks; row3 = four instruction words in RAM at PC-4,PC,PC+4,PC+8 (compare with objdump; mismatch => text corrupted).
+
+ladder-quiet (IMG_3654 + vmlinux search): RAM words at PC-4 = e121f00a e59f30f0 e5932000 e59d307c match vmlinux c005b9b0
+(console_emit_next_record+0x1b4), so the real PC is C005B9B4 (8/B glyph confusion earlier, NOT wakeup_count_store).
+CPU was in printk console emission; console=ttySAC0 UART stalls ~10 ms/char => boot crawls, ticks only taken after irq restore.
+Fix: no console= on the (forced) cmdline; init saves dmesg to INTERNAL. Font: 8 and B are easy to confuse in photos.
+
+CORRECTION (2026-11-06 evening): do_initcall_level() skips the 9 early initcalls, so table index = displayed idx + 9.
+Displayed 318 = table 327 = alsa_sound_last_init, the LAST initcall: all initcalls complete (~10 s). Freeze is in the
+kernel_init tail (after initcalls). Stage word at row y=220: [stage][jiffies]:
+ 0x101 do_basic_setup done  0x102 wait_for_initramfs done  0x103 console_on_rootfs done  0x106 kernel_init_freeable returned
+ 0x107 async_synchronize_full done  0x108 before free_initmem  0x109 after free_initmem  0x10A after mark_readonly
+ 0x10B before run_init_process(/init)
+
+CORRECTION (2026-11-06 evening): do_initcall_level() skips the 9 early initcalls, so table index = displayed idx + 9.
+Displayed 318 = table 327 = alsa_sound_last_init, the LAST initcall: all initcalls complete (~10 s). Freeze is in the
+kernel_init tail (after initcalls). Stage word at row y=220: [stage][jiffies]:
+ 0x101 do_basic_setup done  0x102 wait_for_initramfs done  0x103 console_on_rootfs done  0x106 kernel_init_freeable returned
+ 0x107 async_synchronize_full done  0x108 before free_initmem  0x109 after free_initmem  0x10A after mark_readonly
+ 0x10B before run_init_process(/init)
+
+ladder-keepinit (IMG_3657): stage row = 0x108 / jiffies FFFF8ED3 => kernel froze inside free_initmem() (poison + free of init memory);
+ticks died within ~3 jiffies. STRICT_KERNEL_RWX is off, so free_initmem = poison_init_mem + free_initmem_default. Something still
+uses .init* after boot (unidentified). Workaround: free_initmem() returns immediately (stage 0x120); init memory is kept.
+TODO: find the stale init reference (try poisoning with a smaller range / bisect by section) before re-enabling.
+
+ladder-irqmask (IMG_3658): keepinit still shows stage 0x108 / jiffies FFFF8ED2 and NO 0x120 although free_initmem() is empty =>
+the CPU stops asynchronously ~10.2 s after boot (also at initcall 318 in an earlier build) => suspect IRQ storm from a source left
+unmasked by the bootloader (INTMSK 0x6FFB5CBF) that nothing acks, starving the PWM tick. Fix: homtom_init_irq() masks + clears
+INTMSK/INTSUBMSK/SRCPND/INTPND/SUBSRCPND after s3c2443_init_irq(). Stage row now = [stage][jiffies][SRCPND&~INTMSK][INTMSK].
+
+ladder-console (IMG_3659: stage/INTMSK/pending=0 words => no IRQ storm; last stage glyph is probably 0x10B (B/8 confusion), i.e. kernel
+reached run_init_process(/init)). Old drawings (index squares, live rows, stage row, crash dump) are now disabled; stages go to printk.
+New: LCD text console (homtom-fbtext.c, 60x34 8x8, registered after paging_init, replays log), cmdline ignore_loglevel.
+
+ladder-reboot (owner: power button never shuts the device down, always pinhole reset). Stock gpio_suicide(): codec suspend, 500 ms, then
+IO_Activate(PWR_RST) in a loop; PWR_RST = GPJ10 on the cagliari-like pin map this board matches; "not allowed on LTC3455 with extpower".
+Added .restart (SWRST 0x533C2443 at 0xF6100044, WDT backup) and pm_power_off (GPJ10 high, then reboot fallback).
+From telnet: reboot -f / poweroff -f.  /init now reports via /dev/kmsg and never exits.
+
+ladder-hello (IMG_3660, first readable console): log ends at "Run /init as init process ... TERM=linux" (stages 0x101..0x10B all done, ~1.9 s
+after jiffies start), no panic/oops and none of /init's /dev/kmsg lines. Userspace entry is the failure point.
+/init is now an ARMv4T static probe (kernel/homtom/hello.S) that logs to /dev/kmsg then execs "busybox sh /init.sh";
+initramfs gets /dev/{console,null,kmsg} nodes. Also: power-key poller (GPF0, hold 2 s => kernel_power_off).
+
+ladder-exitcode (IMG_3661): console ends at "process '/init' started with executable stack" (kernel exec message), then silence; power key idle level=1.
+hello.S now reports via exit code (kernel prints "Attempted to kill init! exitcode=0xXXXX" on panic): errno of open(/dev/kmsg), 100+errno of write,
+200 = open+write OK. Plus a 1/s "homtom: alive jiffies N" kernel beacon (30 s, then every 10 s) to tell a hung CPU from a silent userspace.
+
+ladder-idle (IMG_3662): exit-code probe, console ends at "TERM=linux" (executable-stack warning gone), NO "alive" beacon and NO exitcode panic => CPU/tick dead at the
+user-mode transition; power key (polled from the same worker) can't fire either. Stage 0x10B now prints cpuid/cr/hwcap/domain and runs a 4 s sleep test
+("homtom: kernel idle test N") before exec, to separate an idle/timer hang from the user-mode entry.
+
+ladder-trace (IMG_3663): cpuid 41129200 = ARM920T, cr c000717f (I/D cache on, high vectors), domain 53, hwcap 7. Idle test OK (1 line/s, jiffies +100,
+alive beacon OK) right up to "Run /init", then NOTHING => user-mode entry/first user instructions hang. Config has both CPU_ARM920T and CPU_ARM926T and
+CPU_CACHE_V4WT; suspect VIVT/write-back cache coherence for freshly loaded user pages. Build adds: cachepolicy=writethrough, CONFIG_DEBUG_USER + user_debug=31,
+prints "homtom: elf ... entry/sp", "start_thread done", first 60 user page faults ("homtom: user fault addr fsr pc lr").
+
+ladder-trace2 (owner: with ladder-trace the screen stayed SKY BLUE (6i, early boot) for 5-10 s then the device switched off) => cachepolicy=writethrough
+(switching cache attributes of live kernel mappings in early boot) breaks early boot before map_io disables the WDT; WDT reset -> bootloader powers off.
+Reverted. Keep exec trace + DEBUG_USER. Cache-policy experiment, if repeated, must be a compile-time option (CONFIG_CPU_DCACHE_WRITETHROUGH).
+
+ladder-asmtrace (IMG_3664): "elf /init entry 100b8 sp bee2bf10", "start_thread done pc 100b8 sp bee2bf10 cpsr 10", then NOTHING (no user fault line, no beacon).
+First instruction fetch at 0x100b8 must page-fault into do_page_fault (print not seen) => CPU hangs before/at the first exception from user mode
+or in the final return. Hooks print (first 4 each): ret_to_user (pid 1, right before restore_user_regs), pabt_usr, dabt_usr, irq_usr entry.
+
+ladder-flush (IMG_3665): "ret_to_user #1 pid 1 pc 000100b8 psr 00000010" printed, then nothing at all (no pabt/dabt/irq/und/swi) => the CPU enters user mode and never raises an
+exception into the kernel. No first-fetch fault was seen => the text page was already resident (clear_user in padzero), so a VIVT/write-back D-cache vs I-cache
+coherence problem is the leading theory. ret_to_user hook now dumps the 4 words at user VA 0x100b8 and runs __cpuc_flush_kern_all() before returning;
+und_usr and swi hooks added.
+
+ladder-intmod (IMG_3666): "user text @100b8 = e59f004c e3a01001 e3a07005 ef000000" = exactly hello's first 4 instructions; caches flushed; STILL no swi/irq_usr/und_usr/pabt_usr
+=> cache coherence theory ruled out. Kernel runs with F set (cpsr 0x53); user mode starts with cpsr 0x10 (FIQ enabled). Suspect a bootloader-configured/pending FIQ
+source (INTMOD != 0): default vector_fiq returns without acking => FIQ livelock the moment user mode starts. Fix: INTMOD=0 in homtom_init_irq; stage 0x10B now prints
+INTMOD/SRCPND/INTPND/INTMSK/SUBSRCPND/INTSUBMSK.
+
+ladder-fiq (IMG_3667): INTMOD forced 0 (printed 00000000, SRCPND 00004400 INTPND 0 INTMSK fdedddff SUBSRCPND 02000092 INTSUBMSK f703ffff) and STILL no exception after the
+user-mode transition => FIQ livelock ruled out. New: tick-independent FIQ sampler (WDT interval timer, 10 Hz, INTMOD->FIQ; FIQ is masked in the kernel, enabled in user mode).
+It draws interrupted PC+4 at y=250 and CPSR at y=260 as 32 squares each (white=1, MSB left) at the bottom of the console. No squares => the CPU is not executing at all
+(or is in a state with FIQs masked); squares changing => it runs; value tells where.
+
+ladder-fiq2 (IMG_3668): the FIQ sampler fired at once in KERNEL mode (squares overlay the bottom console lines, last intact line "fiq sampler armed", no idle-test lines
+afterwards) = FIQ storm: S3C2443 WDT needs WTCLRINT (WDT base +0x0C) written to drop its request. Handler now writes it. (Also shows: FIQs are deliverable in kernel mode and the
+handler/vector installation work.)
+
+ladder-fiq3 (review finding): arch_cpu_idle_prepare() does local_fiq_enable() => kernel threads run with F=0 (explains FIQ in kernel; rules out user-mode-only FIQ livelock).
+Hypothesis #2 (~30%): every usr_entry runs alignment_trap, which rewrites CP15 c1 from cr_alignment if it differs from the live value; my hooks sit after it, so a silent
+first user exception could be c1 being rewritten. A/B: CONFIG_ALIGNMENT_TRAP=n + print cr_alignment/live cr/domain at ret_to_user. Also: vector_swi hook now restores lr
+(saved_pc) after the bl; FIQ handler writes WTCLRINT first. Expected FIQ-sampler values: lr 0x4..0x20 / 0xffff00xx with spsr 0x17/0x1b => V/c1 lost; lr 0x100bc..0x100c8
+with spsr 0x10 constant => user restart loop; lr 0xc0xxxxxx with spsr 0x93/0x13 => blocked in kernel C (look up in System.map); no squares => core/bus wedged.
+
+ladder-fiq4 (IMG_3668 + repeat): sampler squares read approx PC+4=0xC00202A8 (s3c24xx_default_idle+0x1c), CPSR=0x20000093 (SVC, I set) while the kernel idles; no 'idle test 0' line =>
+FIQ storm (or fiq timing) keeps the main code from progressing. s3c24xx_default_idle writes S3C2410 CLKCON (offset 0x0C, nonexistent on S3C2443) = effectively a no-op loop, so a PC
+in it just means "idling". Mainline s3c2410_wdt confirms WTCLRINT (+0x0c) is the right ack for S3C2443. Now armed only inside the ret_to_user hook (right before returning to user mode).
+
+ROOT CAUSE of the user-mode hang (IMG_3670): "cr_alignment 4c8000d4 live cr c000717f". 0x4C8000D4 = LCD WIN1MAP address, left in r0 by the early colour-ladder
+HOMTOM_PROBE_POST (6g_reveal) inserted right after the MMU-enable mcr in head.S (macro clobbers r0,r1). r0 (= CP15 control value) is saved by __mmap_switched as cr_alignment;
+usr_entry/vector_swi alignment_trap rewrites CP15 c1 from cr_alignment on every user-mode exception => MMU bit cleared => instant death at the first user-mode exception.
+(Likely also why the bootloader machine ID read as 0 earlier: r1 was clobbered by the same macro.) Fix: PROBE_POST removed; ALIGNMENT_TRAP back on; FIQ sampler not armed;
+/init probe execs busybox sh /init.sh (HELLO_EXEC).
+
+ladder-v4t (IMG_3671): with cr_alignment fixed, userspace runs: "Comm: busybox" PID 1 killed by signal 4 (SIGILL), Code bracket e16f2f11 = clz r2,r1 (ARMv5) => Debian armel
+busybox (ARMv5TE) cannot run on ARM920T (ARMv4T). initramfs now uses the stock firmware's BusyBox 1.22.1 + glibc 2.3.2 (ld-linux.so.2, libc.so.6) from .runtime/emu/initramfs
+(OABI userland, kernel has OABI_COMPAT). No build-time applet install; /init.sh relinks applets at runtime.
+
+ladder-stdio (IMG_3672): stock BusyBox 1.22.1 (dynamic, glibc 2.3.2) now runs on the ARM920T (user fault = stack growth, libc at 0xb6f...), then PID 1 calls exit(127)
+(exitcode=0x00007f00) with no visible message (PID 1 has no stdio). hello.S now dup2()s /dev/kmsg to fds 0/1/2 before execve so loader/shell errors reach the LCD console;
+init.sh runs with set -x until the network is up.
+
+ladder-libs (IMG_3673, first visible userspace error): "busybox: error while loading shared libraries: libcrypt.so.1: cannot open shared object file" => the stock BusyBox also
+needs libcrypt.so.1. initramfs now ships every stock lib (ld-linux, libc, libcrypt, libnss_*, libresolv).
+
+ladder-ecmdbg (IMG_3674/3675): /init.sh runs; "homtom-init: up=59.73 carrier=1 oper=up udc=configured" => host configured the gadget, usb0 up, carrier on. Mac still shows en9 inactive
+(watcher) => ECM NETWORK_CONNECTION notify on the interrupt endpoint probably not reaching the host (f_ecm.c ecm_do_notify). Exec trace capped to 3 prints; f_ecm/u_ether/composite
+built with -DDEBUG; status line adds usb0 rx/tx counters; init.sh tail/grep -E replaced with applets this BusyBox has (no tail, no grep -E).
+
+ladder-notify (IMG_3676 + Mac counters en9 Ipkts=10 Opkts=0): ECM debug lines show host sends SET_ETHERNET_PACKET_FILTER (0x0c then 0x0e), eth_open/eth_start/ecm_open run, usb0 rx=0 tx=9,
+device->host bulk-IN reaches the Mac (Ipkts 10) but no "notify connect" debug line follows ecm_open => ecm_do_notify returned early (notify_count stuck: first notification queued but not
+completed). In s3c_hsudc_queue a non-ep0 IN request is QUEUED if ESR.TX_SUCCESS is set and only moves on the ep IRQ. Trace added (int-in queue csr / written vs queued); status loop prints the
+first 8 notify/int-in/event lines.
+
+ladder-listen (Mac side after a manual replug): en9 ACTIVE 192.168.1.100 (device udhcpd), ping 192.168.1.10 0.8 ms 0% loss, TCP answers RST (stack alive) but nothing listens on 21/22/23/80/2323
+=> telnetd not running. Trace of the int-in endpoint: first notify written to FIFO, second queued waiting for TX_SUCCESS irq (host reads on first enumeration never comes until replug).
+init.sh: telnetd -F (exit reported), tcpsvd raw shell 2323, tcpsvd ftpd 21, one soft_connect disconnect/connect after 12 s to re-enumerate (udc_stop/udc_start run phy uninit/init).
+
+ladder-pullup (owner): the soft_connect re-enumeration made the USB device vanish entirely (reboot needed, replug useless) => s3c-hsudc udc_stop/udc_start does not recover on this
+board. Replaced by /sys/kernel/homtom_usb_pullup (board file): toggles only UCLKCON bit 31 (D+ pull-up) = replug without stopping the UDC. DO NOT use soft_connect.
+
+ladder-splash: fbtext is quiet by default (brand splash blitted after paging_init; text only on oops/panic or cmdline homtom.verbose); removed the 2 s idle test. Staged as INTERNAL/ttsystem.
+
+ladder-rebootmode: no flashing colours (HOMTOM_COLOR_LADDER off), verbose fbtext default, /dev/pts for telnetd, /sys/kernel/homtom_splash, /sys/kernel/homtom_reboot_mode (0 SWRST+WDT, 1 WDT, 2 SWRST, 3 PWR_RST low+WDT). reboot -f from ladder-listen powered the unit OFF.

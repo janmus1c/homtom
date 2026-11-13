@@ -1,0 +1,26 @@
+# Local build state and downloaded sources
+.runtime/
+build/
+release/
+node_modules/
+.venv/
+.idea/
+
+# Build outputs (the directory is kept, its contents are not)
+artifacts/*
+!artifacts/.gitkeep
+experiments/
+
+# Per-tool build outputs inside tracked source trees
+workspace/**/out/
+workspace/storagegfx/art/
+panel/build/
+
+# Python and editor noise
+__pycache__/
+*.pyc
+.DS_Store
+
+# Local run control
+STOP
+PAUSE

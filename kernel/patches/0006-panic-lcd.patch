@@ -1,0 +1,327 @@
+homtom: show oops and panic on the LCD, keep a RAM last-log
+
+With the GUI running, the LCD console is muted (/sys/kernel/homtom_splash
+or homtom.quiet), and an oops that did reach the screen was drawn over the
+GUI pixels, with the first lines ("Unable to handle kernel ...") missing.
+
+homtom-fbtext.c:
+ - The first console write with oops_in_progress while muted clears the
+   screen and starts at the top, and turns the panel on (TPAL off,
+   backlight, ENVID).
+ - A kmsg dumper (KMSG_DUMP_OOPS and KMSG_DUMP_PANIC) copies the newest
+   16 KiB of the log into a static buffer, finds the first line of the
+   latest incident ("Unable to handle kernel", "Internal error:",
+   "kernel BUG at", "BUG:", chained back over up to 4 lines; else the
+   "Kernel panic" line; an oops head more than 150 lines before the panic
+   line is treated as an older incident), redraws the screen from there
+   with timestamps stripped, pins the "Kernel panic" line to the bottom
+   row, and freezes the console so the panic tail cannot scroll it away.
+   No allocation, no locks.
+
+Board file:
+ - homtom_panic_lcd_on(): GPB0 output high (backlight full, overrides the
+   PWM that homtom-bl set), LCDCON1 ENVID on. Raw register writes.
+ - pstore/ramoops at 0x33E00000, 64 KiB (memblock_reserve'd): two 16 KiB
+   oops/panic records and a 16 KiB console ring, uncached, no ECC, no
+   compression. After the next boot: mount -t pstore pstore /sys/fs/pstore.
+   Whether TTBL leaves this RAM alone across a reset is unverified.
+
+Defconfig: CONFIG_PANIC_TIMEOUT=10 (panic restarts after 10 s through the
+0004 path, INFORM0=5; before this the panic hung until the watchdog
+fired), CONFIG_PSTORE=y, CONFIG_PSTORE_RAM=y, CONFIG_PSTORE_CONSOLE=y,
+CONFIG_PSTORE_DEFLATE_COMPRESS off.
+
+Applies with -p1 after 0005.
+
+--- a/arch/arm/mach-s3c/mach-homtom-go630.c
++++ b/arch/arm/mach-s3c/mach-homtom-go630.c
+@@ -22,6 +22,7 @@
+ #include <linux/platform_data/i2c-s3c2410.h>
+ #include <linux/gpio_keys.h>
+ #include <linux/input.h>
++#include <linux/pstore_ram.h>
+ #include <linux/memblock.h>
+ #include <linux/pm.h>
+ #include <linux/reboot.h>
+@@ -224,6 +225,31 @@
+ 	},
+ };
+ 
++/*
++ * Last-log buffer (pstore/ramoops): 64 KiB at the top of RAM below the LCD buffer, reserved in homtom_reserve(). Two 16 KiB
++ * oops/panic records plus a 16 KiB console ring, uncached. Survives a reset only if TTBL leaves this RAM alone (unverified);
++ * pstore rejects a region whose headers do not check out. Read after the next boot: mount -t pstore pstore /sys/fs/pstore.
++ */
++#define HOMTOM_RAMOOPS_PHYS	0x33E00000UL
++#define HOMTOM_RAMOOPS_BYTES	0x10000UL
++
++static struct ramoops_platform_data homtom_ramoops_pdata = {
++	.mem_address	= HOMTOM_RAMOOPS_PHYS,
++	.mem_size	= HOMTOM_RAMOOPS_BYTES,
++	.mem_type	= 1,
++	.record_size	= 0x4000,
++	.console_size	= 0x4000,
++	.max_reason	= KMSG_DUMP_OOPS,
++};
++
++static struct platform_device homtom_ramoops_device = {
++	.name	= "ramoops",
++	.id	= -1,
++	.dev	= {
++		.platform_data	= &homtom_ramoops_pdata,
++	},
++};
++
+ static struct platform_device *homtom_devices[] __initdata = {
+ 	&s3c_device_wdt,
+ 	&s3c_device_hsmmc1,
+@@ -232,6 +258,7 @@
+ 	&s3c_device_rtc,
+ 	&s3c_device_i2c0,
+ 	&homtom_keys_device,
++	&homtom_ramoops_device,
+ };
+ 
+ static void homtom_paint_phys(unsigned long phys, u16 color)
+@@ -311,6 +338,17 @@
+ 	}
+ }
+ 
++/*
++ * Called by the LCD console on an oops or panic: backlight fully on (GPB0 output high; this stops the PWM backlight that
++ * homtom-bl may have set, including level 0) and LCD video output enabled. Raw register writes, no locks.
++ */
++void homtom_panic_lcd_on(void)
++{
++	__raw_writel((__raw_readl(S3C2410_GPBCON) & ~3u) | 1u, S3C2410_GPBCON);
++	__raw_writel(__raw_readl(S3C2410_GPBDAT) | 1u, S3C2410_GPBDAT);
++	__raw_writel(__raw_readl(HOMTOM_VA_LCD + HOMTOM_LCDCON1) | 1u, HOMTOM_VA_LCD + HOMTOM_LCDCON1);
++}
++
+ static void __init homtom_map_io(void)
+ {
+ 	/*
+@@ -366,6 +404,7 @@
+ 	u32 n1 = HOMTOM_FB_PHYS >> 1;
+ 
+ 	memblock_reserve(HOMTOM_FB_PHYS, HOMTOM_FB_BYTES);
++	memblock_reserve(HOMTOM_RAMOOPS_PHYS, HOMTOM_RAMOOPS_BYTES);
+ 	__raw_writel(n1, lcd + HOMTOM_LCDSADDR1);
+ 	__raw_writel((n1 + span) & 0x1fffff, lcd + 0x18);
+ }
+--- a/arch/arm/kernel/homtom-fbtext.c
++++ b/arch/arm/kernel/homtom-fbtext.c
+@@ -12,6 +12,7 @@
+ #include <linux/io.h>
+ #include <linux/kernel.h>
+ #include <linux/init.h>
++#include <linux/kmsg_dump.h>
+ #include <linux/printk.h>
+ #include <linux/string.h>
+ #include <linux/types.h>
+@@ -76,6 +77,8 @@
+ 
+ void homtom_fbtext_init(void);
+ void homtom_fbtext_reset_cursor(void);
++/* Board hook: backlight and LCD output on, whatever userland left them at. Raw register writes only. */
++void homtom_panic_lcd_on(void);
+ 
+ /* Two pixels per u32; font bit 1 is the left (lower-address) pixel. */
+ static const u32 fbt_lut[4] = {
+@@ -180,7 +183,17 @@
+ 	if (fbt_quiet) {
+ 		if (!oops_in_progress)
+ 			return;
++		/* The screen holds the splash or the GUI, not console rows: start the oops on a clean screen. */
+ 		fbt_quiet = false;
++		fbt_oops = true;
++		fbt_frozen = false;
++		fbt_row = 0;
++		fbt_col = 0;
++		fbt_dirty_lo = FBT_H;
++		fbt_dirty_hi = 0;
++		fbt_clear_rows(0, FBT_ROWS);
++		__raw_writel(0, FBT_LCD + FBT_TPAL);
++		homtom_panic_lcd_on();
+ 	}
+ 	/* A nested oops inside this function can leave the cursor mid-update. */
+ 	if (fbt_row >= FBT_ROWS)
+@@ -215,8 +228,159 @@
+ 	if (fbt_dirty_hi > fbt_dirty_lo)
+ 		__cpuc_flush_dcache_area(fbt_fb + fbt_dirty_lo * FBT_W,
+ 					 (fbt_dirty_hi - fbt_dirty_lo) * FBT_W * 2);
++}
++
++/*
++ * Oops/panic view, drawn from the kmsg dumper (oops_exit() and panic()): the newest log text, starting at the first line
++ * of the latest incident ("Unable to handle kernel", "Internal error:", "kernel BUG at", "BUG:" or "Kernel panic"), with
++ * the "Kernel panic" line pinned to the bottom row. Static buffers only: nothing is allocated on this path.
++ */
++#define FBT_DUMP_BYTES		16384
++#define FBT_DUMP_LINES		1024
++#define FBT_HEAD_GAP		4	/* earlier head lines this close before the last one belong to the same oops */
++#define FBT_INCIDENT_LINES	150	/* an oops head further than this before the panic line is an older incident */
++
++static char fbt_dump_buf[FBT_DUMP_BYTES];
++static u16 fbt_dump_line[FBT_DUMP_LINES];
++
++static const char *const fbt_heads[] = {
++	"Unable to handle kernel", "Internal error:", "kernel BUG at", "BUG:",
++};
++
++static bool fbt_is_head(const char *l)
++{
++	unsigned int i;
++
++	for (i = 0; i < ARRAY_SIZE(fbt_heads); i++)
++		if (strstr(l, fbt_heads[i]))
++			return true;
++	return false;
++}
++
++/* Skip the "[   12.345678] " timestamp: the screen is only 60 columns wide. */
++static const char *fbt_strip_time(const char *l)
++{
++	const char *e;
++
++	if (l[0] != '[')
++		return l;
++	e = strnchr(l, 16, ']');
++	if (!e)
++		return l;
++	e++;
++	return *e == ' ' ? e + 1 : e;
+ }
+ 
++static void fbt_draw_line(const char *l, unsigned int last_row)
++{
++	fbt_col = 0;
++	for (; *l; l++) {
++		unsigned char c = *l;
++
++		if (fbt_col >= FBT_COLS) {
++			if (fbt_row >= last_row)
++				return;
++			fbt_row++;
++			fbt_col = 0;
++		}
++		if (c == '\t')
++			c = ' ';
++		fbt_glyph(c >= 0x20 && c < 0x7f ? c : '?');
++	}
++}
++
++static void fbt_dump(struct kmsg_dumper *dumper, enum kmsg_dump_reason reason)
++{
++	struct kmsg_dump_iter iter;
++	size_t len = 0;
++	unsigned int n = 0, first, i, start, last_row;
++	int panic_i = -1, head_i = -1;
++	char *p, *end;
++
++	if (!fbt_fb || (reason != KMSG_DUMP_OOPS && reason != KMSG_DUMP_PANIC))
++		return;
++
++	kmsg_dump_rewind(&iter);
++	if (!kmsg_dump_get_buffer(&iter, false, fbt_dump_buf, sizeof(fbt_dump_buf) - 1, &len) || !len)
++		return;
++	end = fbt_dump_buf + len;
++	*end = 0;
++
++	/* Split into NUL-terminated lines; keep the offsets of the newest FBT_DUMP_LINES. */
++	for (p = fbt_dump_buf; p < end; n++) {
++		char *nl = strchrnul(p, '\n');
++
++		*nl = 0;
++		fbt_dump_line[n % FBT_DUMP_LINES] = p - fbt_dump_buf;
++		p = nl + 1;
++	}
++	if (!n)
++		return;
++	first = n > FBT_DUMP_LINES ? n - FBT_DUMP_LINES : 0;
++#define FBT_LINE(i)	(fbt_dump_buf + fbt_dump_line[(i) % FBT_DUMP_LINES])
++
++	if (reason == KMSG_DUMP_PANIC)
++		for (i = n; i-- > first;)
++			if (strstr(FBT_LINE(i), "Kernel panic")) {
++				panic_i = i;
++				break;
++			}
++	for (i = panic_i >= 0 ? panic_i : n; i-- > first;)
++		if (fbt_is_head(FBT_LINE(i))) {
++			head_i = i;
++			break;
++		}
++	if (head_i >= 0 && panic_i >= 0 && panic_i - head_i > FBT_INCIDENT_LINES)
++		head_i = -1;
++	if (head_i >= 0)
++		for (i = head_i; i > first && i + FBT_HEAD_GAP > head_i; ) {
++			i--;
++			if (fbt_is_head(FBT_LINE(i)))
++				head_i = i;
++		}
++
++	if (head_i >= 0)
++		start = head_i;
++	else if (panic_i >= 0)
++		start = panic_i;
++	else
++		start = n > first + FBT_ROWS ? n - FBT_ROWS : first;
++
++	fbt_quiet = false;
++	fbt_oops = true;
++	fbt_frozen = false;
++	fbt_dirty_lo = FBT_H;
++	fbt_dirty_hi = 0;
++	fbt_clear_rows(0, FBT_ROWS);
++	fbt_row = 0;
++
++	/* With a panic line after the start, the body ends one row early and the panic line takes the bottom row. */
++	last_row = (panic_i >= 0 && (unsigned int)panic_i != start) ? FBT_ROWS - 2 : FBT_ROWS - 1;
++	for (i = start; i < n && fbt_row <= last_row; i++) {
++		if ((int)i == panic_i && i != start)
++			continue;
++		fbt_draw_line(fbt_strip_time(FBT_LINE(i)), last_row);
++		fbt_row++;
++	}
++	if (last_row == FBT_ROWS - 2) {
++		fbt_row = FBT_ROWS - 1;
++		fbt_draw_line(fbt_strip_time(FBT_LINE(panic_i)), FBT_ROWS - 1);
++	}
++#undef FBT_LINE
++
++	/* Freeze: later console output (the panic tail, "Rebooting in") must not scroll this away. */
++	fbt_row = FBT_ROWS - 1;
++	fbt_frozen = true;
++	__raw_writel(0, FBT_LCD + FBT_TPAL);
++	homtom_panic_lcd_on();
++	__cpuc_flush_dcache_area(fbt_fb, FBT_W * FBT_H * 2);
++}
++
++static struct kmsg_dumper fbt_dumper = {
++	.dump		= fbt_dump,
++	.max_reason	= KMSG_DUMP_OOPS,
++};
++
+ static struct console fbt_console = {
+ 	.name	= "homtom",
+ 	.write	= fbt_write,
+@@ -253,6 +417,7 @@
+ 	fbt_row = 0;
+ 
+ 	register_console(&fbt_console);
++	kmsg_dump_register(&fbt_dumper);
+ }
+ 
+ void homtom_fbtext_splash(bool on)
+--- a/arch/arm/configs/homtom_defconfig
++++ b/arch/arm/configs/homtom_defconfig
+@@ -137,3 +137,8 @@
+ CONFIG_NO_HZ_IDLE=y
+ CONFIG_HIGH_RES_TIMERS=y
+ CONFIG_KEYBOARD_GPIO_POLLED=y
++CONFIG_PANIC_TIMEOUT=10
++CONFIG_PSTORE=y
++# CONFIG_PSTORE_DEFLATE_COMPRESS is not set
++CONFIG_PSTORE_CONSOLE=y
++CONFIG_PSTORE_RAM=y

@@ -1,0 +1,52 @@
+s3c-hsudc: drain both OUT buffers in one interrupt
+
+s3c_hsudc_epout_intr() read the second buffered packet only when the first
+read did not complete the request. A short packet completes its request, and
+nearly every ECM frame is short, so with both OUT buffers full the second
+packet stayed in the FIFO until the next host packet raised another
+interrupt: replies on usb0 arrived one host packet late (docs/ROBUSTNESS.md
+E3, E5).
+
+Read up to two packets per interrupt, each into the request at the head of
+the queue. The giveback drops the lock and may select another endpoint, so
+the index is selected again and RX_SUCCESS is re-read before every read.
+While the giveback runs the endpoint is marked stopped, so a re-queue from
+rx_complete only appends and never reads the FIFO itself.
+
+Applies with -p1 to the kernel tree (.runtime/linux-trim-*).
+
+--- a/drivers/usb/gadget/udc/s3c-hsudc.c
++++ b/drivers/usb/gadget/udc/s3c-hsudc.c
+@@ -426,14 +426,26 @@
+ 	}
+ 
+ 	if (csr & S3C_ESR_RX_SUCCESS) {
+-		if (list_empty(&hsep->queue))
+-			return;
++		int n;
+ 
+-		hsreq = list_entry(hsep->queue.next,
+-				struct s3c_hsudc_req, queue);
+-		if (((s3c_hsudc_read_fifo(hsep, hsreq)) == 0) &&
+-				(csr & S3C_ESR_PSIF_TWO))
++		/*
++		 * Both OUT buffers can be full behind a single interrupt, and
++		 * a short packet completes its request. Drain every buffered
++		 * packet now instead of leaving the second one for the next
++		 * host packet. The giveback drops the lock and may select
++		 * another endpoint, so select ours again and trust only a
++		 * fresh status read.
++		 */
++		for (n = 0; n < 2; n++) {
++			if (list_empty(&hsep->queue))
++				return;
++			set_index(hsudc, ep_idx);
++			if (!(readl(hsudc->regs + S3C_ESR) & S3C_ESR_RX_SUCCESS))
++				return;
++			hsreq = list_entry(hsep->queue.next,
++					struct s3c_hsudc_req, queue);
+ 			s3c_hsudc_read_fifo(hsep, hsreq);
++		}
+ 	}
+ }
+ 

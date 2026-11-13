@@ -1,0 +1,10 @@
+config MACH_TOMTOMGO
+	bool "homtom GO 630 (TomTom GO 630 / S3C2443)"
+	select S3C_DEV_HSMMC1
+	select FIQ
+	help
+	  Homtom OS board support for the TomTom GO 630 (S3C2443).
+	  Uses ATAG machine type 605 (historical MACH_TOMTOMGO) so the
+	  stock bootloader can load the image. Product userspace is
+	  homtom, not OpenTom/Nano-X. LCD uses classic LCDCON
+	  (CONFIG_FB_S3C2410). USB gadget is S3C2443 HSUDC + g_ether.

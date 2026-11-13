@@ -1,0 +1,200 @@
+homtom: in-kernel restart with the stock S3C2443 reset sequence
+
+reboot -f (machine_restart), panic reboot and any other in-kernel restart
+wrote INFORM0=5 and SWRST straight from cached kernel code at full clock.
+The same two register writes from userspace (devmem) reboot reliably, the
+in-kernel path did not (docs/LESSONS.md, "Autonomous cycle works").
+
+Port the stock 2.6.13 s3c2443_cpu_reboot (arch/arm/mach-s3c2410/sleep.S):
+
+ 1. IRQ and FIQ off, INFORM0=5 (TTBL "Reboot" path, storage window).
+ 2. Watchdog armed as a backup (prescaler 255, /128, count 0x800: about
+    1 s at full PCLK, longer once the clock is dropped).
+ 3. setup_mm_for_reboot(): identity map, so the final routine also runs
+    correctly at its physical address.
+ 4. homtom-reset.S: clean+invalidate the caches (arm920_flush_kern_cache_all),
+    SDRAM REFRESH (0x48000010) = 0x2e, CLKSRC MSYSCLK from the crystal,
+    drain the write buffer, invalidate TLBs and caches, then call the
+    .idmap.text routine twice: a trial run with Z clear that only pulls its
+    cache line in, then for real: MMU off, SWRST (0x4C000044 = 0x533c2443),
+    spin.
+
+Deviation from stock: stock writes CLKSRC=0; this clears only bit 4
+(MSYSCLK source), so the EPLL selection and EPLLCON stay untouched.
+Stock also wrote INFORM0=1 (neutral) before the reset; this TTBL needs 5.
+INFORM0=3 is never written.
+
+/sys/kernel/homtom_reboot_mode keeps A/B variants: 0 stock sequence
+(default), 1 watchdog only, 2 direct SWRST then watchdog (the k2 path).
+All write INFORM0=5. pm_power_off (GPJ10) is unchanged and still ends in
+this restart.
+
+Applies with -p1 on top of 0001-0003 to the kernel tree (.runtime/linux-trim-*).
+
+--- a/arch/arm/mach-s3c/Makefile.s3c24xx
++++ b/arch/arm/mach-s3c/Makefile.s3c24xx
+@@ -100,4 +100,4 @@
+ obj-$(CONFIG_S3C2443_SETUP_SPI)		+= setup-spi-s3c24xx.o
+ obj-$(CONFIG_ARCH_S3C24XX)		+= setup-i2c-s3c24xx.o
+ obj-$(CONFIG_S3C24XX_SETUP_TS)		+= setup-ts-s3c24xx.o
+-obj-$(CONFIG_MACH_TOMTOMGO)	+= mach-homtom-go630.o
++obj-$(CONFIG_MACH_TOMTOMGO)	+= mach-homtom-go630.o homtom-reset.o
+--- /dev/null
++++ b/arch/arm/mach-s3c/homtom-reset.S
+@@ -0,0 +1,63 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * GO 630 (S3C2443) software reset, ported from the stock 2.6.13
++ * s3c2443_cpu_reboot (arch/arm/mach-s3c2410/sleep.S): clean the caches,
++ * drop the SDRAM refresh count and the system clock to the crystal, then
++ * write SWRST from a cache line that has already been fetched once, with
++ * the MMU off. The final routine lives in .idmap.text so that it also runs
++ * correctly from SDRAM if the I-cache line were ever missed: the caller
++ * switches to the identity map (setup_mm_for_reboot()) first.
++ */
++#include <linux/linkage.h>
++#include <asm/assembler.h>
++
++#define HOMTOM_PA_SWRST		0x4C000044
++#define HOMTOM_SWRST_RESTART	0x533c2443
++#define HOMTOM_REFRESH_SLOW	0x2e
++
++	.text
++/*
++ * void homtom_cpu_reboot(void __iomem *refresh, void __iomem *clksrc,
++ *			  u32 clksrc_slow, unsigned long do_reboot_phys)
++ *
++ * IRQ and FIQ off, INFORM0 already written, identity map active.
++ * Never returns.
++ */
++ENTRY(homtom_cpu_reboot)
++	mov	r4, r0
++	mov	r5, r1
++	mov	r6, r2
++	mov	r8, r3
++	bl	arm920_flush_kern_cache_all
++
++	mov	r0, #HOMTOM_REFRESH_SLOW
++	str	r0, [r4]			@ SDRAM REFRESH for the slow clock
++	str	r6, [r5]			@ CLKSRC: MSYSCLK from the crystal
++
++	mov	r1, #0
++	mcr	p15, 0, r1, c7, c10, 4		@ drain write buffer
++	mcr	p15, 0, r1, c8, c7, 0		@ invalidate I & D TLBs
++	mcr	p15, 0, r1, c7, c7, 0		@ invalidate I & D caches
++
++	ldr	r4, =HOMTOM_PA_SWRST
++	ldr	r7, =HOMTOM_SWRST_RESTART
++
++	teq	r8, #0				@ Z clear (r8 != 0): trial run fills the I-cache line
++	mov	lr, pc
++	mov	pc, r8
++	teq	r0, r0				@ Z set: now for real
++	mov	pc, r8
++ENDPROC(homtom_cpu_reboot)
++	.ltorg
++
++	.pushsection	.idmap.text, "ax"
++	.align	5
++ENTRY(homtom_do_reboot)
++	mrc	p15, 0, r0, c1, c0, 0
++	bic	r0, r0, #1
++	mcreq	p15, 0, r0, c1, c0, 0		@ MMU off
++	streq	r7, [r4]			@ SWRST
++1:	beq	1b
++	ret	lr
++ENDPROC(homtom_do_reboot)
++	.popsection
+--- a/arch/arm/mach-s3c/mach-homtom-go630.c
++++ b/arch/arm/mach-s3c/mach-homtom-go630.c
+@@ -32,6 +32,8 @@
+ #include <asm/mach/map.h>
+ #include <asm/mach-types.h>
+ #include <asm/tlbflush.h>
++#include <asm/idmap.h>
++#include <asm/memory.h>
+ 
+ #include "hardware-s3c24xx.h"
+ #include "map-s3c24xx.h"
+@@ -336,34 +338,63 @@
+ 
+ /*
+  * Reboot/poweroff (the stock kernel did this in arch_reset()/gpio_suicide()).
+- * SWRST lives in the statically mapped clock block (S3C_VA_SYS = 0xF6100000, +0x44);
+- * watchdog reset is the backup. Poweroff drives PWR_RST (GPJ10, active high on this board revision)
+- * like gpio_suicide(); the PMIC cannot cut power on USB bus power, so fall back to a reboot.
+- * Userspace: use "reboot -f" / "poweroff -f" (BusyBox otherwise signals a non-BusyBox PID 1).
++ * TTBL decides from INFORM0 (0x4C000070) after reset: 5 (watchdog) / 9 (software reset) = "Reboot", boots straight on;
++ * anything else = "Power down", where it sleeps unless the power key is held. Only 5 is ever written here; never 3.
++ *
++ * Default path (mode 0) is the stock s3c2443_cpu_reboot sequence (homtom-reset.S): INFORM0=5, a slow watchdog as backup,
++ * identity map, clean the caches, SDRAM refresh and system clock down to the crystal, then SWRST from a pre-fetched cache
++ * line with the MMU off, so no SDRAM access is in flight when the reset hits.
++ * Poweroff drives PWR_RST (GPJ10, active high on this board revision) like gpio_suicide(); the PMIC cannot cut power on
++ * USB bus power, so fall back to a reboot.
+  */
+-/* /sys/kernel/homtom_reboot_mode: 0 SWRST then WDT, 1 WDT only, 2 SWRST only, 3 PWR_RST low + WDT */
++/* /sys/kernel/homtom_reboot_mode: 0 stock sequence (default), 1 watchdog only, 2 direct SWRST (the k2 path); all INFORM0=5 */
+ static int homtom_reboot_mode;
+ 
+-static void homtom_restart(enum reboot_mode mode, const char *cmd)
++#define HOMTOM_INFORM0_REBOOT	5
++#define HOMTOM_CLKSRC_MSYSCLK_MPLL	(1u << 4)
++
++extern void __noreturn homtom_cpu_reboot(void __iomem *refresh, void __iomem *clksrc, u32 clksrc_slow,
++					 unsigned long do_reboot_phys);
++extern void homtom_do_reboot(void);
++
++/* WTCON: prescaler 0xff, clock /128, enable, reset. At PCLK 66 MHz one count is about 0.5 ms; slower after the clock drop. */
++static void homtom_wdt_arm(u32 count)
+ {
+-	void __iomem *sys = (void __iomem *)0xF6100000UL;
+ 	void __iomem *wdt = (void __iomem *)0xF6400000UL;
+ 
++	__raw_writel(0, wdt);
++	__raw_writel(count, wdt + 0x04);	/* WTDAT */
++	__raw_writel(count, wdt + 0x08);	/* WTCNT */
++	__raw_writel((0xff << 8) | (1 << 5) | (3 << 3) | (1 << 0), wdt);
++}
++
++static void homtom_restart(enum reboot_mode mode, const char *cmd)
++{
++	void __iomem *sys = (void __iomem *)0xF6100000UL;
++	u32 clksrc;
++
+ 	local_irq_disable();
+-	/*
+-	 * TTBL decides from INFORM0 (0x4C000070) after reset: 5 (watchdog) / 9 (software reset) = "Reboot", boots straight on;
+-	 * anything else = "Power down", where it sleeps unless the power key is held. Verified by writing 5 then SWRST by hand.
+-	 */
+-	__raw_writel(homtom_reboot_mode == 2 ? 9 : 5, sys + 0x70);
+-	if (homtom_reboot_mode != 1) {
++	local_fiq_disable();
++	__raw_writel(HOMTOM_INFORM0_REBOOT, sys + 0x70);
++
++	if (homtom_reboot_mode == 1) {
++		homtom_wdt_arm(0x10);
++		mdelay(5000);
++		return;
++	}
++	if (homtom_reboot_mode == 2) {
+ 		__raw_writel(0x533c2443, sys + 0x44);	/* S3C2443_SWRST */
+ 		mdelay(1000);
++		homtom_wdt_arm(0x10);
++		mdelay(5000);
++		return;
+ 	}
+-	__raw_writel(0, wdt);			/* WTCON off */
+-	__raw_writel(0x100, wdt + 0x08);	/* WTCNT */
+-	__raw_writel(0x100, wdt + 0x04);	/* WTDAT */
+-	__raw_writel((1 << 5) | (1 << 0) | (1 << 3) | (0x80 << 8), wdt);	/* enable, reset, DIV16, prescale */
+-	mdelay(5000);
++
++	/* Backup if SWRST does nothing: about 1 s at full speed, longer once the clock is down. */
++	homtom_wdt_arm(0x800);
++	clksrc = __raw_readl(sys + 0x20) & ~HOMTOM_CLKSRC_MSYSCLK_MPLL;
++	setup_mm_for_reboot();
++	homtom_cpu_reboot(S3C_VA_MEM + 0x10, sys + 0x20, clksrc, virt_to_idmap(homtom_do_reboot));
+ }
+ 
+ static void homtom_power_off(void)
