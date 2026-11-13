@@ -1,0 +1,6 @@
+#!/bin/sh
+# Emulator shim for /sbin/reboot: the supervisor resets the emulated board.
+. /.emu/lib.sh
+emu_log "reboot $*"
+emu_event "reboot"
+while :; do /bin/busybox sleep 60; done

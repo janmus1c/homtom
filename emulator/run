@@ -1,0 +1,3 @@
+#!/bin/sh
+# Start the homtom emulator and print its URL. Options: see emulator/emu.py up --help.
+exec python3 "$(dirname "$0")/emu.py" up "$@"

@@ -1,0 +1,32 @@
+# Base config (workspace/gui/conf/full.conf as ui.conf): Device, Power, the Restart confirmation and Cancel; then the
+# power key hold hints as the key daemon writes them (key hold5, then the short press of the release, which must not lock).
+# Nothing is restarted or powered off: every dialog is cancelled. Live values differ from the sample, so the content
+# outside the dialog and hint cards and the right of the header are masked.
+config workspace/gui/conf/full.conf
+data workspace/gui/sample.txt
+ignore 300 0 180 40
+settle 1
+
+# hub: Device tile, then the Power row
+tap 396 210
+tap 358 61
+shot power
+expect-match power 0.5
+
+tap 400 74
+shot confirm
+expect-replay 0.5
+expect-changed 1
+
+tap 160 180
+shot cancelled
+expect-match power 0.5
+
+key hold5
+shot hint
+expect-replay 0.5
+expect-changed 1
+
+key short
+shot after-hint
+expect-match power 0.5

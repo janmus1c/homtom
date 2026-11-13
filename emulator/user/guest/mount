@@ -1,0 +1,40 @@
+#!/bin/sh
+# Emulator shim for /bin/mount. Storage devices are bound from /.emu/disk/<dev>; filesystems
+# only the TomTom kernel has (sysfs tree, usbfs, ngffs) are faked; proc, tmpfs and devpts are real.
+. /.emu/lib.sh
+TYPE=
+OPTS=
+SRC=
+DIR=
+while [ $# -gt 0 ]; do
+	case "$1" in
+	-t) TYPE=$2; shift ;;
+	-o) OPTS=$2; shift ;;
+	-n|-r|-w|-v|-f) ;;
+	*) if [ -z "$SRC" ]; then SRC=$1; else DIR=$1; fi ;;
+	esac
+	shift
+done
+[ -n "$SRC" ] || exec /bin/busybox mount
+case ",$OPTS," in *,remount,*) emu_log "mount remount $SRC ok"; exit 0 ;; esac
+[ -n "$DIR" ] || { DIR=$SRC; SRC=; }
+case "$TYPE" in
+proc|tmpfs)
+	/bin/busybox mount -t $TYPE $TYPE "$DIR"; RC=$? ;;
+devpts)
+	/bin/busybox mount -t devpts -o newinstance,ptmxmode=0666 devpts "$DIR"; RC=$? ;;
+sysfs|usbfs)
+	RC=0; emu_log "mount $TYPE on $DIR faked" ;;
+ngffs)
+	/bin/busybox mount -t tmpfs ngffs "$DIR"; RC=$?; emu_log "mount ngffs $SRC on $DIR faked as empty tmpfs" ;;
+*)
+	DEV=${SRC#/dev/}
+	if [ -d "/.emu/disk/$DEV" ]; then
+		/bin/busybox mount -o bind "/.emu/disk/$DEV" "$DIR"; RC=$?
+	else
+		echo "mount: mounting $SRC on $DIR failed: Invalid argument" >&2
+		RC=255
+	fi ;;
+esac
+emu_log "mount -t $TYPE $SRC $DIR -> $RC"
+exit $RC

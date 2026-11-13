@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>homtom emulator</title>
+<style>
+  :root { --ink: #0e161e; --panel: #16212c; --line: #263545; --text: #dbe4ec; --dim: #8a9aab; --blue: #18bcf2; --red: #f2555a; --green: #3ccf7a; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--ink); color: var(--text); font: 14px/1.4 -apple-system, system-ui, sans-serif; }
+  main { max-width: 1000px; margin: 0 auto; padding: 24px 16px; display: grid; gap: 16px; }
+  header { display: flex; align-items: baseline; gap: 12px; }
+  h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  h1 b { color: var(--blue); }
+  #status { color: var(--dim); font-variant-numeric: tabular-nums; }
+  .device { background: #05080b; border: 1px solid var(--line); border-radius: 18px; padding: 18px; width: fit-content; max-width: 100%; }
+  canvas { display: block; width: 960px; max-width: 100%; aspect-ratio: 480 / 272; image-rendering: pixelated; cursor: crosshair; touch-action: none; background: #000; }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; }
+  button { font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 14px; cursor: pointer; display: inline-flex; gap: 8px; align-items: center; }
+  button:hover { border-color: var(--blue); }
+  .led { width: 9px; height: 9px; border-radius: 50%; background: #3a4757; }
+  .on .led { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  #power.on .led { background: var(--green); }
+  #power:not(.on) .led { background: var(--red); }
+  small { color: var(--dim); }
+</style>
+</head>
+<body>
+<main>
+  <header><h1><b>homtom</b> GO 630 emulator</h1><span id="status">connecting</span></header>
+  <div class="device"><canvas id="screen" width="480" height="272"></canvas></div>
+  <div class="controls">
+    <button id="power"><span class="led"></span>Power</button>
+    <button id="reset">Reset</button>
+    <button id="usb"><span class="led"></span>USB plugged</button>
+    <button id="shot">Screenshot</button>
+  </div>
+  <small>Userspace emulator (qemu-user): the device's own /etc/rc and OpenTom binaries; kernel-only steps are shimmed. Click or drag on the screen to touch.</small>
+</main>
+<script>
+const canvas = document.getElementById("screen"), ctx = canvas.getContext("2d");
+const status = document.getElementById("status");
+let seq = -1, state = {};
+
+async function post(path, body) {
+  const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+  return r.json();
+}
+
+function render(s) {
+  state = s;
+  document.getElementById("power").classList.toggle("on", s.power);
+  document.getElementById("usb").classList.toggle("on", s.usb);
+  status.textContent = `${s.mode} · boot ${s.boot_id} · ${s.uptime.toFixed(0)} s`;
+}
+
+async function frames() {
+  for (;;) {
+    try {
+      const r = await fetch(`/api/frame?after=${seq}`);
+      seq = +r.headers.get("X-Seq");
+      ctx.drawImage(await createImageBitmap(await r.blob()), 0, 0);
+    } catch (e) { await new Promise(r => setTimeout(r, 1000)); }
+  }
+}
+
+async function poll() {
+  for (;;) {
+    try { render(await (await fetch("/api/state")).json()); } catch (e) { status.textContent = "disconnected"; }
+    await new Promise(r => setTimeout(r, 1000));
+  }
+}
+
+function point(e) {
+  const b = canvas.getBoundingClientRect();
+  return { x: Math.max(0, Math.min(479, Math.round((e.clientX - b.left) * 480 / b.width))),
+           y: Math.max(0, Math.min(271, Math.round((e.clientY - b.top) * 272 / b.height))) };
+}
+
+let down = false, last = 0;
+canvas.addEventListener("pointerdown", e => { down = true; canvas.setPointerCapture(e.pointerId); post("/api/touch", { ...point(e), down: true, first: true }); });
+canvas.addEventListener("pointermove", e => {
+  if (!down || performance.now() - last < 20) return;
+  last = performance.now();
+  post("/api/touch", { ...point(e), down: true });
+});
+canvas.addEventListener("pointerup", e => { down = false; post("/api/touch", { ...point(e), down: false }); });
+
+document.getElementById("power").onclick = async () => render(await post("/api/power"));
+document.getElementById("reset").onclick = async () => render(await post("/api/reset"));
+document.getElementById("usb").onclick = async () => render(await post("/api/usb", { on: !state.usb }));
+document.getElementById("shot").onclick = () => { const a = document.createElement("a"); a.href = "/api/screen.png"; a.download = `homtom-${Date.now()}.png`; a.click(); };
+
+frames();
+poll();
+</script>
+</body>
+</html>

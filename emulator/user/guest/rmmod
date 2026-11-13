@@ -1,0 +1,12 @@
+#!/bin/sh
+# Emulator shim for /sbin/rmmod.
+. /.emu/lib.sh
+NAME=`echo "$1" | /bin/busybox tr - _`
+if ! /bin/busybox grep -q "^$NAME " /.emu/modules 2>/dev/null; then
+	echo "rmmod: can't unload '$NAME': unknown symbol in module, or unknown parameter" >&2
+	emu_log "rmmod $NAME -> not loaded"
+	exit 1
+fi
+/bin/busybox sed -i "/^$NAME /d" /.emu/modules
+emu_event "rmmod $NAME"
+emu_log "rmmod $NAME"

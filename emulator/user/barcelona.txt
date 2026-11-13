@@ -1,0 +1,61 @@
+# /proc/barcelona for the emulator, one "name value" per line, in the kernel's order
+# (drivers/barcelona/hw/hwdrv.c). Values come from IO_InitModena and IO_InitModenaJA_B_C
+# in arch/arm/mach-s3c2410/tomtomgo-type.c and the boot log, not from a device read.
+# Replace with the device's own output when available:
+#   for f in /proc/barcelona/*; do echo "${f##*/} `cat $f`"; done
+modelid 25
+modelname TomTom GO 630
+familyname TomTom GO
+usbname GO 630
+btname TomTom GO 630
+cputype 5
+bluetooth 1
+btdev ttySAC1
+btchip 4
+btusb 0
+btspeed 921600
+btclock 16000000
+btclass 2622472
+handsfree 1
+headsetgw 1
+a2dp 1
+lowbutton 0
+sdcard 1
+hs_sdcard 0
+sdslot 1
+hsmmc 1
+harddisk 0
+tsfets 0
+remote 0
+dockdev ttySAC3
+docking 0
+dockstate 0
+tfttype 7
+gpstype 3
+gpsdev ttySAC2
+gldetected 0
+gpsephemeris 1
+headphoneconnector 0
+codectype 2
+canrecordaudio 1
+codecmaster 0
+acctype 0
+usbslavetype 3
+lightsensor 0
+deadreckoning 0
+loquendo 1
+alg 0
+tomtomwork 0
+resetstate 0
+rdstmc 0
+sixbuttonui 0
+gprsmodem 0
+gprsmodemdev
+pnp 1
+usbhost 0
+fmtransmitter 0
+internalflash 1
+batterytype 4
+bootdevice
+rebootonsdremoval 0
+onoff 0

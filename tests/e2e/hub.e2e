@@ -1,0 +1,27 @@
+# Built-in config (workspace/gui/conf/default.conf): the System hub opens its subpages and the header back arrow
+# returns. Content shows live device data that differs from workspace/gui/sample.txt, so it is masked, as is the clock and
+# battery at the right of the header; the title area is compared. Hub tiles: Display x 8..156, GPS 165..313, Device
+# 322..471, all y 40..148. Back arrow: x 0..47, y 0..39.
+config workspace/gui/conf/default.conf
+data workspace/gui/sample.txt
+ignore 0 40 480 232
+ignore 300 0 180 40
+settle 1
+
+shot hub
+expect-match system 0.5
+
+tap 239 94
+shot gps
+expect-match gps 0.5
+expect-changed 0.5
+
+tap 20 20
+shot back
+expect-match system 0.5
+expect-changed 0.5
+
+tap 396 94
+shot device
+expect-match device 0.5
+expect-changed 0.5

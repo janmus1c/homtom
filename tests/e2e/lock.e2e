@@ -1,0 +1,26 @@
+# Power key short press locks the screen (backlight 0, touches ignored, no redraw) and the next one unlocks it; the
+# built-in config binds `on key=short screen:toggle`. While locked the framebuffer keeps the last frame, so the
+# screenshots stay the same; after unlocking, a tap works again. Check by eye that the backlight goes off and on.
+config workspace/gui/conf/default.conf
+data workspace/gui/sample.txt
+ignore 300 0 180 40
+settle 1
+
+shot before
+key short
+shot locked
+expect-same 0.5
+
+# a tap on the GPS tile while locked does nothing
+tap 239 94
+shot locked-tap
+expect-same 0.5
+
+key short
+shot unlocked
+expect-same 0.5
+
+tap 239 94
+shot gps
+expect-match gps 0.5
+expect-changed 0.5

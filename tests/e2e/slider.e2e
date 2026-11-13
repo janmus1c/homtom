@@ -1,0 +1,11 @@
+# Drag the brightness slider of the built-in config's Display page (hub tile at 82,94; track x 20..460 at y 116) and
+# compare with a host render that replays the same drag. The clock and battery in the header are masked.
+config workspace/gui/conf/default.conf
+data workspace/gui/sample.txt
+ignore 300 0 180 40
+tap 82 94
+shot before
+slider 20 460 116 10 50 90
+shot after
+expect-replay 0.5
+expect-changed 0.1

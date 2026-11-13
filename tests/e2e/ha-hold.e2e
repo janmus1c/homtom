@@ -1,0 +1,22 @@
+# Office page (workspace/gui/conf/office.conf): a long press on the Hue 1 tile (x 162..307, y 40..115) opens the light
+# page, Back returns. Neither sends an HA event. The device needs that config as ui.conf; live HA values differ from the
+# sample, so only the title area is compared exactly and the light page is compared with a loose limit.
+config workspace/gui/conf/office.conf
+data workspace/gui/sample.txt
+ha workspace/gui/tests/ha.states.sample
+ignore 300 0 180 40
+settle 1
+
+shot office
+expect-region office 0 0 300 40 0.5
+
+# held for 1 s (> 600 ms): opens the light page for office_hue1, no toggle on release
+tap 235 78 1000
+shot light
+expect-changed 5
+expect-replay 20
+
+# Back (the arrow at the top left of the header) returns to the office page
+tap 20 20
+shot back
+expect-region office 0 0 300 40 0.5

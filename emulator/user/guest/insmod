@@ -1,0 +1,20 @@
+#!/bin/sh
+# Emulator shim for /sbin/insmod: checks the module file and records the load; no kernel code runs.
+. /.emu/lib.sh
+FILE=$1
+shift
+if [ ! -f "$FILE" ]; then
+	echo "insmod: can't read '$FILE': No such file or directory" >&2
+	emu_log "insmod $FILE $* -> missing"
+	exit 1
+fi
+NAME=`emu_modname "$FILE"`
+[ -n "$NAME" ] || NAME=`/bin/busybox basename "$FILE" .ko | /bin/busybox tr - _`
+if /bin/busybox grep -q "^$NAME " /.emu/modules 2>/dev/null; then
+	echo "insmod: can't insert '$FILE': File exists" >&2
+	emu_log "insmod $FILE $* -> exists"
+	exit 1
+fi
+echo "$NAME $FILE $*" >>/.emu/modules
+emu_event "insmod $NAME $*"
+emu_log "insmod $FILE $* -> $NAME"
